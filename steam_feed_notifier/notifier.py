@@ -2,7 +2,7 @@ import apprise
 
 from .parser import Event
 
-MAX_NOTIFICATION_BODY_LENGTH = 1200
+MAX_NOTIFICATION_BODY_LENGTH = 400
 
 
 class NotificationError(RuntimeError):
@@ -32,10 +32,10 @@ def notify(
     failures: list[str] = []
     failed_events: list[Event] = []
     for event in events:
-        title = f"Steam · {event.actor or 'Activity'}"
+        title = event.notification_title or event.actor or "Activity"
         body = _body(event)
         if dry_run:
-            print(f"{title} | {event.summary} | {event.link}")
+            print(f"{title} | {body}")
             if on_success:
                 on_success(event)
             continue
