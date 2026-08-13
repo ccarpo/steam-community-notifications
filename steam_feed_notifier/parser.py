@@ -18,12 +18,24 @@ class Event:
     summary: str
     link: str
     day_timestamp: int
+    notification_title: str = ""
 
     def as_dict(self) -> dict:
         return asdict(self)
 
 
-MAX_SUMMARY_LENGTH = 1000
+MAX_SUMMARY_LENGTH = 400
+STABLE_ID_SUMMARY_LENGTH = 1000
+MAX_ANNOUNCEMENT_BODY_LENGTH = 350
+MAX_NOTIFICATION_TITLE_LENGTH = 60
+_STABLE_ID_LINK_SELECTORS = (
+    ".blotter_group_announcement_headline a",
+    ".blotter_gamepurchase_text a",
+    ".blotter_gamepurchase_details a",
+    "a[href*='/status/']",
+    "a[href*='/app/']",
+    ".blotter_screenshot_title a",
+)
 _INTERACTION_SELECTORS = (
     ".commentthread_area",
     ".blotter_comment_thread",
@@ -64,15 +76,160 @@ def _actor(node: Tag) -> tuple[str, str]:
     return _persona(author), urljoin("https://steamcommunity.com", author.get("href", ""))
 
 
-def _link(node: Tag) -> str:
-    preferred = node.select_one(
-        ".blotter_group_announcement_headline a, .blotter_gamepurchase_text a, "
-        ".blotter_gamepurchase_details a, a[href*='/status/'], a[href*='/app/'], "
-        ".blotter_screenshot_title a"
-    )
+def _link(node: Tag, kind: str = "") -> str:
+    if kind == "group_announcement":
+        return _announcement_fields(node)[2]
+    if kind == "game_purchase":
+        return _purchase_link(node)
+    if kind == "screenshot":
+        screenshot = node.select_one(".modalContentLink.ugc[href]")
+        if screenshot:
+            return urljoin("https://steamcommunity.com", screenshot["href"])
+    preferred = node.select_one(", ".join(_STABLE_ID_LINK_SELECTORS))
     if not preferred:
         preferred = node.select_one("a[href]")
     return urljoin("https://steamcommunity.com", preferred.get("href", "")) if preferred else ""
+
+
+def _stable_id_link(node: Tag) -> str:
+    preferred = node.select_one(", ".join(_STABLE_ID_LINK_SELECTORS))
+    if not preferred:
+        preferred = node.select_one("a[href]")
+    return urljoin("https://steamcommunity.com", preferred.get("href", "")) if preferred else ""
+
+
+def _short(value: str, limit: int) -> str:
+    value = re.sub(r"\s+", " ", value).strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
+def _title(*parts: str) -> str:
+    values = [part.strip() for part in parts if part.strip()]
+    return _short(" · ".join(values), MAX_NOTIFICATION_TITLE_LENGTH)
+
+
+def _app_anchors(node: Tag) -> list[Tag]:
+    return [
+        anchor
+        for anchor in node.select("a[href*='/app/']")
+        if _text(anchor)
+    ]
+
+
+def _purchase_game(node: Tag) -> tuple[str, str]:
+    anchors = [
+        anchor
+        for anchor in node.select(
+            ".blotter_author_block a[href*='store.steampowered.com/'], "
+            ".blotter_gamepurchase_logo[href*='store.steampowered.com/'], "
+            ".blotter_gamepurchase_details a[href*='store.steampowered.com/']"
+        )
+        if _text(anchor)
+    ]
+    if not anchors:
+        anchors = _app_anchors(node)
+    if not anchors:
+        return "", ""
+    return _text(anchors[0]), urljoin("https://steamcommunity.com", anchors[0]["href"])
+
+
+def _purchase_link(node: Tag) -> str:
+    store = node.select_one(
+        ".blotter_author_block a[href*='store.steampowered.com/'], "
+        ".blotter_gamepurchase_logo[href*='store.steampowered.com/'], "
+        ".blotter_gamepurchase_details a[href*='store.steampowered.com/']"
+    )
+    if store:
+        return urljoin("https://steamcommunity.com", store["href"])
+    _, app_link = _purchase_game(node)
+    return app_link
+
+
+def _announcement_fields(node: Tag) -> tuple[str, str, str]:
+    game_anchor = node.select_one(".blotter_group_announcement_header_text a[href]")
+    headline_anchor = node.select_one(".blotter_group_announcement_headline a[href]")
+    game = _text(game_anchor) if game_anchor else ""
+    headline = _text(headline_anchor) if headline_anchor else ""
+    link = (
+        urljoin("https://steamcommunity.com", headline_anchor["href"])
+        if headline_anchor
+        else ""
+    )
+    return game, headline, link
+
+
+def _structured_fields(node: Tag, kind: str, actor: str) -> tuple[str, str, str]:
+    if kind == "rollup_played":
+        apps = _app_anchors(node)
+        game = _text(apps[0]) if apps else ""
+        text = _text(node)
+        if actor:
+            text = re.sub(rf"^{re.escape(actor)}\s+", "", text)
+        if game:
+            text = text.replace(game, "", 1)
+        body = re.sub(r"\s+", " ", text).strip()
+        body = body[:1].upper() + body[1:] if body else "Played."
+        return _title(actor, game), body, ""
+
+    if kind == "rollup_wishlist":
+        games = [_text(anchor) for anchor in _app_anchors(node)]
+        return _title(actor, "Wishlist"), ", ".join(games), ""
+
+    if kind == "rollup_achievement":
+        apps = _app_anchors(node)
+        game = _text(apps[0]) if apps else ""
+        achievements = [
+            re.sub(r"\s+", " ", image["title"]).strip()
+            for image in node.select("img[title]")
+            if image.get("title", "").strip()
+        ]
+        return _title(actor, game), "; ".join(achievements), ""
+
+    if kind == "game_purchase":
+        game, app_link = _purchase_game(node)
+        description_node = node.select_one(".blotter_gamepurchase_text")
+        description = _text(description_node) if description_node else ""
+        body = "Now owns it."
+        if description:
+            body += f" {_short(description, 200)}"
+        return _title(actor, game), body, _purchase_link(node) or app_link
+
+    if kind == "group_announcement":
+        game, headline, announcement_link = _announcement_fields(node)
+        content = node.select_one(".group_announcement_auto_collapse")
+        excerpt = _text(content) if content else ""
+        body = headline
+        if excerpt:
+            body += f" {excerpt}"
+        return (
+            _title(game, "Announcement"),
+            _short(body, MAX_ANNOUNCEMENT_BODY_LENGTH),
+            announcement_link,
+        )
+
+    if kind == "screenshot":
+        game_anchors = [
+            anchor
+            for anchor in node.select(".blotter_author_block a[href*='/app/']")
+            if _text(anchor)
+        ]
+        game = _text(game_anchors[0]) if game_anchors else ""
+        match = re.search(
+            r"\buploaded\s+(\d+)\s+screenshots?\b", _text(node), re.IGNORECASE
+        )
+        count = match.group(1) if match else ""
+        body = f"Uploaded {count} screenshots." if count else "Uploaded screenshots."
+        screenshot = node.select_one(".modalContentLink.ugc[href]")
+        link = (
+            urljoin("https://steamcommunity.com", screenshot["href"])
+            if screenshot
+            else ""
+        )
+        return _title(actor, game), body, link
+
+    return _title(actor or "Activity"), "", ""
 
 
 def _kind(node: Tag, text: str) -> str:
@@ -97,7 +254,7 @@ def _kind(node: Tag, text: str) -> str:
     return "other"
 
 
-def _summary(node: Tag, kind: str) -> str:
+def _summary(node: Tag, kind: str, max_length: int = MAX_SUMMARY_LENGTH) -> str:
     clean = deepcopy(node)
     for selector in _INTERACTION_SELECTORS:
         for element in clean.select(selector):
@@ -116,9 +273,9 @@ def _summary(node: Tag, kind: str) -> str:
         additions = [title for title in titles if title not in summary]
         if additions:
             summary = f"{summary} {'; '.join(additions)}"
-    if len(summary) <= MAX_SUMMARY_LENGTH:
+    if len(summary) <= max_length:
         return summary
-    return summary[: MAX_SUMMARY_LENGTH - 1].rstrip() + "…"
+    return summary[: max_length - 1].rstrip() + "…"
 
 
 def parse_events(html: str) -> list[Event]:
@@ -140,12 +297,29 @@ def parse_events(html: str) -> list[Event]:
             blocks.extend(rollups or candidates or [block])
         for node in blocks:
             kind = _kind(node, _text(node))
-            summary = _summary(node, kind)
-            if not summary:
+            stable_id_summary = _summary(node, kind, STABLE_ID_SUMMARY_LENGTH)
+            stable_id_link = _stable_id_link(node)
+            if not stable_id_summary:
                 continue
             actor, profile = _actor(node)
-            link = _link(node)
-            normalized = f"{timestamp}|{summary}|{link}"
+            title, structured_summary, structured_link = _structured_fields(node, kind, actor)
+            summary = structured_summary or stable_id_summary
+            if not structured_summary:
+                title = _title(actor or "Activity")
+            link = structured_link or _link(node, kind)
+            # These inputs are frozen so existing seen.json files keep matching.
+            normalized = f"{timestamp}|{stable_id_summary}|{stable_id_link}"
             event_id = node.get("id") or hashlib.sha256(normalized.encode()).hexdigest()[:24]
-            events.append(Event(event_id, kind, actor, profile, summary, link, timestamp))
+            events.append(
+                Event(
+                    event_id,
+                    kind,
+                    actor,
+                    profile,
+                    summary,
+                    link,
+                    timestamp,
+                    title,
+                )
+            )
     return events
