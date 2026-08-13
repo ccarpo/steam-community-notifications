@@ -25,9 +25,17 @@ class Event:
 
 
 MAX_SUMMARY_LENGTH = 400
-LEGACY_SUMMARY_LENGTH = 1000
+STABLE_ID_SUMMARY_LENGTH = 1000
 MAX_ANNOUNCEMENT_BODY_LENGTH = 350
 MAX_NOTIFICATION_TITLE_LENGTH = 60
+_STABLE_ID_LINK_SELECTORS = (
+    ".blotter_group_announcement_headline a",
+    ".blotter_gamepurchase_text a",
+    ".blotter_gamepurchase_details a",
+    "a[href*='/status/']",
+    "a[href*='/app/']",
+    ".blotter_screenshot_title a",
+)
 _INTERACTION_SELECTORS = (
     ".commentthread_area",
     ".blotter_comment_thread",
@@ -77,22 +85,14 @@ def _link(node: Tag, kind: str = "") -> str:
         screenshot = node.select_one(".modalContentLink.ugc[href]")
         if screenshot:
             return urljoin("https://steamcommunity.com", screenshot["href"])
-    preferred = node.select_one(
-        ".blotter_group_announcement_headline a, .blotter_gamepurchase_text a, "
-        ".blotter_gamepurchase_details a, a[href*='/status/'], a[href*='/app/'], "
-        ".blotter_screenshot_title a"
-    )
+    preferred = node.select_one(", ".join(_STABLE_ID_LINK_SELECTORS))
     if not preferred:
         preferred = node.select_one("a[href]")
     return urljoin("https://steamcommunity.com", preferred.get("href", "")) if preferred else ""
 
 
-def _legacy_link(node: Tag) -> str:
-    preferred = node.select_one(
-        ".blotter_group_announcement_headline a, .blotter_gamepurchase_text a, "
-        ".blotter_gamepurchase_details a, a[href*='/status/'], a[href*='/app/'], "
-        ".blotter_screenshot_title a"
-    )
+def _stable_id_link(node: Tag) -> str:
+    preferred = node.select_one(", ".join(_STABLE_ID_LINK_SELECTORS))
     if not preferred:
         preferred = node.select_one("a[href]")
     return urljoin("https://steamcommunity.com", preferred.get("href", "")) if preferred else ""
@@ -203,7 +203,11 @@ def _structured_fields(node: Tag, kind: str, actor: str) -> tuple[str, str, str]
         body = headline
         if excerpt:
             body += f" {excerpt}"
-        return _title(game, "Announcement"), _short(body, MAX_ANNOUNCEMENT_BODY_LENGTH), announcement_link
+        return (
+            _title(game, "Announcement"),
+            _short(body, MAX_ANNOUNCEMENT_BODY_LENGTH),
+            announcement_link,
+        )
 
     if kind == "screenshot":
         game_anchors = [
@@ -293,17 +297,18 @@ def parse_events(html: str) -> list[Event]:
             blocks.extend(rollups or candidates or [block])
         for node in blocks:
             kind = _kind(node, _text(node))
-            legacy_summary = _summary(node, kind, LEGACY_SUMMARY_LENGTH)
-            legacy_link = _legacy_link(node)
-            if not legacy_summary:
+            stable_id_summary = _summary(node, kind, STABLE_ID_SUMMARY_LENGTH)
+            stable_id_link = _stable_id_link(node)
+            if not stable_id_summary:
                 continue
             actor, profile = _actor(node)
             title, structured_summary, structured_link = _structured_fields(node, kind, actor)
-            summary = structured_summary or legacy_summary
+            summary = structured_summary or stable_id_summary
             if not structured_summary:
                 title = _title(actor or "Activity")
             link = structured_link or _link(node, kind)
-            normalized = f"{timestamp}|{legacy_summary}|{legacy_link}"
+            # These inputs are frozen so existing seen.json files keep matching.
+            normalized = f"{timestamp}|{stable_id_summary}|{stable_id_link}"
             event_id = node.get("id") or hashlib.sha256(normalized.encode()).hexdigest()[:24]
             events.append(
                 Event(
