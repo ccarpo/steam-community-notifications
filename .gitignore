@@ -1,5 +1,6 @@
 config.yaml
 .steam-feed-state.json
+state/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
