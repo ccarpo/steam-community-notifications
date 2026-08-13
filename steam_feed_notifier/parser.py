@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from urllib.parse import urljoin
 
@@ -20,6 +21,17 @@ class Event:
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+MAX_SUMMARY_LENGTH = 1000
+_INTERACTION_SELECTORS = (
+    ".commentthread_area",
+    ".blotter_comment_thread",
+    ".blotter_viewallcomments_container",
+    ".blotter_control_container",
+    ".blotter_voters_names",
+    ".blotter_group_announcement_rating_controls",
+)
 
 
 def _text(node: Tag) -> str:
@@ -86,7 +98,15 @@ def _kind(node: Tag, text: str) -> str:
 
 
 def _summary(node: Tag, kind: str) -> str:
-    summary = _text(node)
+    clean = deepcopy(node)
+    for selector in _INTERACTION_SELECTORS:
+        for element in clean.select(selector):
+            element.decompose()
+    if kind == "group_announcement":
+        content = clean.select_one(".blotter_group_announcement_content")
+        summary = _text(content or clean)
+    else:
+        summary = _text(clean)
     if kind == "rollup_achievement":
         titles = [
             re.sub(r"\s+", " ", image["title"]).strip()
@@ -96,7 +116,9 @@ def _summary(node: Tag, kind: str) -> str:
         additions = [title for title in titles if title not in summary]
         if additions:
             summary = f"{summary} {'; '.join(additions)}"
-    return summary
+    if len(summary) <= MAX_SUMMARY_LENGTH:
+        return summary
+    return summary[: MAX_SUMMARY_LENGTH - 1].rstrip() + "…"
 
 
 def parse_events(html: str) -> list[Event]:

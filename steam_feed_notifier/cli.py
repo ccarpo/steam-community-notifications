@@ -11,7 +11,7 @@ import yaml
 
 from .config import Config
 from .fetcher import SteamFeed, SteamFeedError
-from .notifier import notify
+from .notifier import NotificationError, notify
 from .parser import parse_events
 from .state import SeenState
 
@@ -72,8 +72,28 @@ def run_once(config: Config, first_run_notify: bool = False, fixture_dir: str | 
         print(f"Seeded {len(events)} events silently.")
         return
     selected = unseen[: config.max_notifications_per_poll]
-    notify(selected, config.apprise_urls, config.dry_run)
-    state.add([e.id for e in selected])
+    pending = selected
+    for attempt in range(2):
+        if not pending:
+            break
+        try:
+            notify(
+                pending,
+                config.apprise_urls,
+                config.dry_run,
+                on_success=lambda event: state.add([event.id]),
+            )
+        except NotificationError as exc:
+            pending = exc.failed_events
+            if attempt == 1:
+                state.add([event.id for event in pending])
+                print(
+                    f"Giving up on {len(pending)} notification(s) after 2 attempts; "
+                    "marked them seen.",
+                    flush=True,
+                )
+        else:
+            pending = []
     print(f"Processed {len(selected)} new events ({len(events)} fetched).")
 
 
