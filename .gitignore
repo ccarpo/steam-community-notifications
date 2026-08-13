@@ -1,0 +1,7 @@
+config.yaml
+.steam-feed-state.json
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
