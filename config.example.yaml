@@ -1,0 +1,11 @@
+profile: ccarpo
+steam_login_secure: "paste-cookie-value-here"
+apprise_urls:
+  - "ntfy://ntfy.sh/your-topic"
+poll_interval: 300
+state_file: "~/.local/state/steam-feed-notifier/seen.json"
+include_kinds: []
+exclude_kinds: []
+max_notifications_per_poll: 20
+dry_run: false
+seed_days: 2
