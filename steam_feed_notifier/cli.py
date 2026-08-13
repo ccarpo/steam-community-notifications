@@ -4,11 +4,14 @@ import argparse
 import json
 import random
 import time
+from dataclasses import replace
 from pathlib import Path
+
+import yaml
 
 from .config import Config
 from .fetcher import SteamFeed, SteamFeedError
-from .notifier import notify
+from .notifier import NotificationError, notify
 from .parser import parse_events
 from .state import SeenState
 
@@ -41,6 +44,16 @@ def _load_html(
     return [text for _, text in SteamFeed(config.profile, config.steam_login_secure).fetch(days or 1)]
 
 
+def reload_config(path: str, previous: Config | None = None) -> Config:
+    try:
+        return Config.load(path)
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        if previous is None:
+            raise
+        print(f"config reload failed: {exc}; using last good config", flush=True)
+        return previous
+
+
 def run_once(config: Config, first_run_notify: bool = False, fixture_dir: str | None = None) -> None:
     state = SeenState(config.state_file)
     is_first_run = not state.path.exists()
@@ -59,15 +72,34 @@ def run_once(config: Config, first_run_notify: bool = False, fixture_dir: str | 
         print(f"Seeded {len(events)} events silently.")
         return
     selected = unseen[: config.max_notifications_per_poll]
-    notify(selected, config.apprise_urls, config.dry_run)
-    state.add([e.id for e in selected])
+    pending = selected
+    for attempt in range(2):
+        if not pending:
+            break
+        try:
+            notify(
+                pending,
+                config.apprise_urls,
+                config.dry_run,
+                on_success=lambda event: state.add([event.id]),
+            )
+        except NotificationError as exc:
+            pending = exc.failed_events
+            if attempt == 1:
+                state.add([event.id for event in pending])
+                print(
+                    f"Giving up on {len(pending)} notification(s) after 2 attempts; "
+                    "marked them seen.",
+                    flush=True,
+                )
+        else:
+            pending = []
     print(f"Processed {len(selected)} new events ({len(events)} fetched).")
 
 
 def main() -> None:
     args = _parser().parse_args()
-    config = Config.load(args.config)
-    config.dry_run = config.dry_run or args.dry_run
+    config = reload_config(args.config)
     if args.command == "debug":
         htmls = _load_html(config, args.fixture_dir, args.html)
         payload = []
@@ -79,15 +111,26 @@ def main() -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
     if args.command == "once":
+        config.dry_run = config.dry_run or args.dry_run
         run_once(config, first_run_notify=args.notify_first_run, fixture_dir=args.fixture_dir)
         return
     delay = config.poll_interval
+    first_run_notify = args.notify_first_run
+    loaded = config
     while True:
+        previous, loaded = loaded, reload_config(args.config, loaded)
+        if loaded != previous:
+            print(
+                f"config reloaded (poll_interval={loaded.poll_interval}, dry_run={loaded.dry_run})",
+                flush=True,
+            )
+        config = replace(loaded, dry_run=loaded.dry_run or args.dry_run)
         try:
-            run_once(config)
+            run_once(config, first_run_notify=first_run_notify)
             delay = config.poll_interval
+            first_run_notify = False
         except (SteamFeedError, OSError, RuntimeError) as exc:
-            print(f"poll failed: {exc}")
+            print(f"poll failed: {exc}", flush=True)
             delay = min(delay * 2, 3600)
         time.sleep(delay + random.uniform(0, min(30, delay * 0.1)))
 

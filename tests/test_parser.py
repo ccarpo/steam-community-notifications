@@ -55,6 +55,20 @@ def test_real_corpus_exact_links_achievements_and_personas():
     assert "( Alias " not in events[1].summary
 
 
+def test_real_corpus_long_bodies_exclude_interaction_chrome():
+    interaction_text = ("Rate up", "Post Comment", "View all comments", "Jethias")
+    events = [
+        event
+        for path in FIXTURES.glob("day[0-7].html")
+        for event in parse_events(path.read_text())
+        if event.kind in {"group_announcement", "game_purchase"}
+    ]
+    assert events
+    for event in events:
+        assert len(event.summary) <= 1000
+        assert not any(text in event.summary for text in interaction_text)
+
+
 def test_other_fallback_does_not_drop_unknown_activity():
     html = """
     <div class="blotter_day" id="blotter_day_1700000000">

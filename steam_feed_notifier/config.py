@@ -24,6 +24,8 @@ class Config:
         raw: dict[str, Any] = yaml.safe_load(Path(path).expanduser().read_text()) or {}
         if os.getenv("STEAM_LOGIN_SECURE"):
             raw["steam_login_secure"] = os.environ["STEAM_LOGIN_SECURE"]
+        if os.getenv("STEAM_FEED_STATE_FILE"):
+            raw["state_file"] = os.environ["STEAM_FEED_STATE_FILE"]
         profile = raw.get("profile", raw.get("profile_url", raw.get("vanity_id")))
         if not profile:
             raise ValueError("config must define profile (a Steam vanity ID or profile URL)")
