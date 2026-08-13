@@ -96,9 +96,10 @@ def main() -> None:
         return
     delay = config.poll_interval
     first_run_notify = args.notify_first_run
+    loaded = config
     while True:
-        loaded = reload_config(args.config, config)
-        if loaded != config:
+        previous, loaded = loaded, reload_config(args.config, loaded)
+        if loaded != previous:
             print(
                 f"config reloaded (poll_interval={loaded.poll_interval}, dry_run={loaded.dry_run})",
                 flush=True,
