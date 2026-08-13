@@ -78,27 +78,56 @@ mkdir -p state
 docker compose up -d --build
 ```
 
-The repository's `docker-compose.yml` mounts `config.yaml` read-only at
-`/config/config.yaml`, runs `watch`, and persists the seen-event state in the
-host `./state` directory (mounted at `/state` in the container). The compose
-environment override makes the state path `/state/seen.json`, so container
-restarts do not re-seed or re-notify old activity.
+The repository's `docker-compose.yml` mounts the project directory read-only at
+`/config`, so the host `config.yaml` is available as
+`/config/config.yaml`. Mounting the containing directory is intentional:
+editors that save by renaming a new file over `config.yaml` are then visible
+inside the container. The service runs `watch` and persists the seen-event
+state in the host `./state` directory (mounted at `/state` in the container).
+The compose environment override makes the state path `/state/seen.json`, so
+container restarts do not re-seed or re-notify old activity.
 Compose runs with your host UID/GID by default so a private (`0600`) mounted
 `config.yaml` remains readable without running as root. Set `UID` and `GID`
 explicitly if your host account uses different IDs.
 
 The watch loop reloads the mounted YAML at the start of every poll. To replace
-an expired cookie, edit `config.yaml`; the next poll uses the new
-`steamLoginSecure` without restarting the container. If the file is
+an expired cookie, replace the cookie in `config.yaml`; the next poll uses the
+new `steamLoginSecure` without restarting the container. If the file is
 temporarily malformed while an editor is saving it, the service logs the
 reload error and keeps using the last valid configuration. You can also pass
 the cookie through `STEAM_LOGIN_SECURE` in the environment; Compose passes that
-variable through when set, and it takes precedence over the YAML value.
+variable through when set, and it takes precedence over the YAML value. A
+single-file bind such as `./config.yaml:/config/config.yaml:ro` is not
+equivalent: Docker pins that mount to the original inode, so editor
+rename-over saves may never reach the container.
 
 ```sh
 docker compose logs -f steam-feed-notifier
 docker compose down
 docker compose up -d
+```
+
+If an earlier `up` ran before `config.yaml` existed, Docker may have created a
+directory with that name. This can produce:
+
+```text
+error mounting ".../config.yaml" to rootfs at "/config/config.yaml": ... not a directory
+```
+
+Create `config.yaml` as a regular file before the first `up`. To recover from
+this error, remove the failed container and recreate it:
+
+```sh
+docker compose down
+docker compose up -d --build
+```
+
+The fresh `./state` directory must be writable by the compose UID/GID; a new
+`seen.json` is created there with that ownership. If a previous run as root
+left a root-owned state file, repair it before starting:
+
+```sh
+sudo chown -R "$(id -u):$(id -g)" state
 ```
 
 Do not commit `config.yaml` or the `state/` directory. The image runs as a
