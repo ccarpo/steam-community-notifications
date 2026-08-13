@@ -8,5 +8,5 @@ services:
       STEAM_LOGIN_SECURE: "${STEAM_LOGIN_SECURE:-}"
       STEAM_FEED_STATE_FILE: /state/seen.json
     volumes:
-      - ./config.yaml:/config/config.yaml:ro
+      - .:/config:ro
       - ./state:/state
