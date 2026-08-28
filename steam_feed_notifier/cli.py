@@ -5,15 +5,35 @@ import json
 import random
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
 import yaml
 
+from .auth import (
+    AuthManager,
+    SteamAuthError,
+    SteamAuthExpiredError,
+    TokenStore,
+    jwt_claims,
+    login_via_qr,
+)
 from .config import Config
 from .fetcher import SteamFeed, SteamFeedError
 from .notifier import NotificationError, notify
 from .parser import parse_events
 from .state import SeenState
+
+
+def _format_expiry(value: int | str | None) -> str:
+    try:
+        timestamp = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    if timestamp <= 0:
+        return "unknown"
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -28,6 +48,10 @@ def _parser() -> argparse.ArgumentParser:
     debug = sub.add_parser("debug")
     debug.add_argument("--html", help="read raw HTML from this file")
     debug.add_argument("--raw", action="store_true", help="include raw HTML in JSON output")
+    login = sub.add_parser("login")
+    login.add_argument("--device-name", default="steam-feed-notifier")
+    login.add_argument("--timeout", type=int, default=600)
+    sub.add_parser("auth-status")
     return p
 
 
@@ -41,7 +65,30 @@ def _load_html(
         return [Path(html).read_text()]
     if fixture_dir:
         return [p.read_text() for p in sorted(Path(fixture_dir).glob("day*.html"))]
-    return [text for _, text in SteamFeed(config.profile, config.steam_login_secure).fetch(days or 1)]
+    session = requests.Session()
+    store = TokenStore(config.auth_file)
+    try:
+        stored = store.load()
+    except SteamAuthError:
+        stored = None
+    if stored and stored.get("steamid") and stored.get("refresh_token"):
+        provider = AuthManager(
+            store,
+            session,
+            on_refresh=lambda expiry: print(
+                f"minted new access token (expires {expiry.isoformat()})", flush=True
+            ),
+        )
+    elif config.steam_login_secure:
+        provider = config.steam_login_secure
+    else:
+        raise SteamAuthError(
+            "no usable authentication configured; run the login command "
+            "or set steam_login_secure"
+        )
+    return [
+        text for _, text in SteamFeed(config.profile, provider, session=session).fetch(days or 1)
+    ]
 
 
 def reload_config(path: str, previous: Config | None = None) -> Config:
@@ -100,6 +147,47 @@ def run_once(config: Config, first_run_notify: bool = False, fixture_dir: str | 
 def main() -> None:
     args = _parser().parse_args()
     config = reload_config(args.config)
+    if args.command == "login":
+        def show_challenge(url: str) -> None:
+            print(f"Scan this QR code in the Steam mobile app:\n{url}", flush=True)
+            try:
+                import qrcode
+
+                qr = qrcode.QRCode(border=1)
+                qr.add_data(url)
+                qr.make(fit=True)
+                for row in qr.get_matrix():
+                    print("".join("██" if cell else "  " for cell in row))
+            except (ImportError, OSError, ValueError):
+                print("QR rendering is unavailable; use the URL above.", flush=True)
+
+        steamid, refresh_token, access_token = login_via_qr(
+            requests.Session(),
+            args.device_name,
+            show_challenge,
+            timeout=args.timeout,
+        )
+        TokenStore(config.auth_file).save(
+            {
+                "steamid": steamid,
+                "refresh_token": refresh_token,
+                "access_token": access_token,
+            }
+        )
+        access_expiry = jwt_claims(access_token).get("exp")
+        refresh_expiry = jwt_claims(refresh_token).get("exp")
+        print(f"Logged in SteamID: {steamid}")
+        print(f"Access-token expiry: {_format_expiry(access_expiry)}")
+        print(f"Refresh-token expiry: {_format_expiry(refresh_expiry)}")
+        return
+    if args.command == "auth-status":
+        manager = AuthManager(TokenStore(config.auth_file), requests.Session())
+        status = manager.status()
+        print(f"SteamID: {status['steamid']}")
+        print(f"Access-token expiry: {_format_expiry(status['access_expiry'])}")
+        print(f"Refresh-token expiry: {_format_expiry(status['refresh_expiry'])}")
+        print(f"Refresh-token renewal window active: {status['renewal_window']}")
+        return
     if args.command == "debug":
         htmls = _load_html(config, args.fixture_dir, args.html)
         payload = []
@@ -129,6 +217,9 @@ def main() -> None:
             run_once(config, first_run_notify=first_run_notify)
             delay = config.poll_interval
             first_run_notify = False
+        except SteamAuthExpiredError as exc:
+            print(f"poll failed: authentication expired; {exc}; run login again", flush=True)
+            delay = min(delay * 2, 3600)
         except (SteamFeedError, OSError, RuntimeError) as exc:
             print(f"poll failed: {exc}", flush=True)
             delay = min(delay * 2, 3600)
