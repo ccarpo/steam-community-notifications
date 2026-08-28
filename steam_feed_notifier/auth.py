@@ -270,7 +270,8 @@ class AuthManager:
         return self.cookie()
 
     def status(self) -> dict[str, Any]:
-        steamid, refresh_token, access_token = self._require_refresh()
+        steamid, refresh_token = self._require_refresh()
+        access_token = self.tokens.get("access_token", "")
         now = int(time.time())
         return {
             "steamid": steamid,

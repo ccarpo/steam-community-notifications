@@ -28,9 +28,12 @@ from .state import SeenState
 
 def _format_expiry(value: int | str | None) -> str:
     try:
-        return datetime.fromtimestamp(int(value or 0), tz=timezone.utc).isoformat()
+        timestamp = int(value or 0)
     except (TypeError, ValueError, OverflowError):
         return "unknown"
+    if timestamp <= 0:
+        return "unknown"
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -47,6 +50,7 @@ def _parser() -> argparse.ArgumentParser:
     debug.add_argument("--raw", action="store_true", help="include raw HTML in JSON output")
     login = sub.add_parser("login")
     login.add_argument("--device-name", default="steam-feed-notifier")
+    login.add_argument("--timeout", type=int, default=600)
     sub.add_parser("auth-status")
     return p
 
@@ -161,6 +165,7 @@ def main() -> None:
             requests.Session(),
             args.device_name,
             show_challenge,
+            timeout=args.timeout,
         )
         TokenStore(config.auth_file).save(
             {

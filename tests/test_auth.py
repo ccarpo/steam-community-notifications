@@ -16,6 +16,7 @@ from steam_feed_notifier.auth import (
     login_via_qr,
     mint_access_token,
 )
+from steam_feed_notifier.cli import _format_expiry, _parser
 from steam_feed_notifier.fetcher import SteamFeed, SteamFeedError
 
 
@@ -200,6 +201,32 @@ def test_auth_manager_renews_refresh_token_and_persists_rotation(tmp_path):
     assert session.post_calls[0][1]["renewal_type"] == "1"
     assert store.load()["refresh_token"] == rotated
     assert store.load()["access_token"] == access
+
+
+def test_auth_manager_status_with_and_without_access_token(tmp_path):
+    refresh = token(sub="1", exp=int(time.time()) + 90 * 24 * 60 * 60)
+    access = token(exp=int(time.time()) + 3600)
+    path = Path(tmp_path) / "auth.json"
+    store = TokenStore(str(path))
+    store.save({"steamid": "1", "refresh_token": refresh, "access_token": access})
+    status = AuthManager(store, FakeSession()).status()
+    assert status["steamid"] == "1"
+    assert status["access_expiry"] == jwt_claims(access)["exp"]
+    assert status["refresh_expiry"] == jwt_claims(refresh)["exp"]
+    assert status["renewal_window"] is False
+
+    store.save({"steamid": "1", "refresh_token": refresh})
+    status = AuthManager(store, FakeSession()).status()
+    assert status["access_expiry"] == 0
+    assert status["refresh_expiry"] == jwt_claims(refresh)["exp"]
+
+
+def test_login_parser_defaults_to_ten_minute_timeout():
+    args = _parser().parse_args(["login"])
+    assert args.timeout == 600
+    assert _parser().parse_args(["login", "--timeout", "42"]).timeout == 42
+    assert _format_expiry(0) == "unknown"
+    assert _format_expiry(None) == "unknown"
 
 
 def test_fetcher_refreshes_once_after_logged_out_response():
