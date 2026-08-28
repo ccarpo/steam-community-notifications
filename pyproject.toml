@@ -7,7 +7,7 @@ name = "steam-feed-notifier"
 version = "0.1.0"
 description = "Poll Steam's private friend activity feed and send push notifications."
 requires-python = ">=3.10"
-dependencies = ["requests", "beautifulsoup4", "apprise", "PyYAML"]
+dependencies = ["requests", "beautifulsoup4", "apprise", "PyYAML", "qrcode"]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]

@@ -13,11 +13,16 @@ class Config:
     apprise_urls: list[str] = field(default_factory=list)
     poll_interval: int = 300
     state_file: str = "~/.local/state/steam-feed-notifier/seen.json"
+    auth_file: str | None = None
     include_kinds: list[str] = field(default_factory=list)
     exclude_kinds: list[str] = field(default_factory=list)
     max_notifications_per_poll: int = 20
     dry_run: bool = False
     seed_days: int = 2
+
+    def __post_init__(self):
+        if not self.auth_file:
+            self.auth_file = str(Path(self.state_file).expanduser().parent / "auth.json")
 
     @classmethod
     def load(cls, path: str) -> "Config":
@@ -26,9 +31,15 @@ class Config:
             raw["steam_login_secure"] = os.environ["STEAM_LOGIN_SECURE"]
         if os.getenv("STEAM_FEED_STATE_FILE"):
             raw["state_file"] = os.environ["STEAM_FEED_STATE_FILE"]
+        if os.getenv("STEAM_FEED_AUTH_FILE"):
+            raw["auth_file"] = os.environ["STEAM_FEED_AUTH_FILE"]
         profile = raw.get("profile", raw.get("profile_url", raw.get("vanity_id")))
         if not profile:
             raise ValueError("config must define profile (a Steam vanity ID or profile URL)")
+        state_file = str(raw.get("state_file", cls.state_file))
+        auth_file = str(
+            raw.get("auth_file", Path(state_file).expanduser().parent / "auth.json")
+        )
         return cls(
             profile=str(profile),
             steam_login_secure=str(raw.get("steam_login_secure", "")).removeprefix(
@@ -36,7 +47,8 @@ class Config:
             ),
             apprise_urls=list(raw.get("apprise_urls", [])),
             poll_interval=int(raw.get("poll_interval", 300)),
-            state_file=str(raw.get("state_file", cls.state_file)),
+            state_file=state_file,
+            auth_file=auth_file,
             include_kinds=list(raw.get("include_kinds", raw.get("event_kinds", {}).get("include", []))),
             exclude_kinds=list(raw.get("exclude_kinds", raw.get("event_kinds", {}).get("exclude", []))),
             max_notifications_per_poll=int(raw.get("max_notifications_per_poll", 20)),

@@ -17,12 +17,31 @@ cp config.example.yaml config.yaml
 steam-feed-notifier --config config.yaml once
 ```
 
-To get the cookie in Chrome: open Steam Community while logged in, press
-DevTools (`F12`), choose **Application → Cookies → https://steamcommunity.com**,
-copy the `steamLoginSecure` value, and paste it into `config.yaml`. It is a
-live session token, not a permanent API key; it will expire or be revoked and
-must then be refreshed. Prefer `STEAM_LOGIN_SECURE` in the environment when
-possible. Never commit or log it.
+Authenticate once with Steam's QR flow:
+
+```sh
+steam-feed-notifier --config config.yaml login
+```
+
+Scan and approve the printed QR code in the Steam mobile app. The resulting
+`auth.json` is stored beside `state_file` (the default is
+`~/.local/state/steam-feed-notifier/auth.json`). Access tokens are renewed
+automatically, and the refresh token is renewed and persisted before its own
+expiry. Check token expiries with:
+
+```sh
+steam-feed-notifier --config config.yaml auth-status
+```
+
+The QR login never prints token values. Keep the auth file private and do not
+commit or log it.
+
+Manual cookies remain available as a fallback. To get one in Chrome, open
+Steam Community while logged in, press DevTools (`F12`), choose
+**Application → Cookies → https://steamcommunity.com**, copy the
+`steamLoginSecure` value, and put it in `config.yaml` or `STEAM_LOGIN_SECURE`.
+It is a live session token, not a permanent API key; it will expire or be
+revoked and must then be refreshed. Never commit or log it.
 
 The included `ntfy` example is a convenient phone target: install the ntfy
 app, subscribe to a private topic, and set
@@ -40,7 +59,9 @@ first-run seed.
 steam-feed-notifier --config config.yaml once
 steam-feed-notifier --config config.yaml --dry-run once
 steam-feed-notifier --config config.yaml watch
-steam-feed-notifier --config config.yaml debug --fixture-dir tests/fixtures
+steam-feed-notifier --config config.yaml --fixture-dir tests/fixtures debug
+steam-feed-notifier --config config.yaml login
+steam-feed-notifier --config config.yaml auth-status
 ```
 
 `watch` uses a minutes-scale interval, jitter, and exponential backoff for
@@ -74,7 +95,7 @@ Create the host-mounted configuration and state directory:
 ```sh
 cp config.example.yaml config.yaml
 mkdir -p state
-# edit config.yaml and add the steamLoginSecure cookie
+# edit config.yaml
 docker compose up -d --build
 ```
 
@@ -85,7 +106,17 @@ editors that save by renaming a new file over `config.yaml` are then visible
 inside the container. The service runs `watch` and persists the seen-event
 state in the host `./state` directory (mounted at `/state` in the container).
 The compose environment override makes the state path `/state/seen.json`, so
-container restarts do not re-seed or re-notify old activity.
+the auth file defaults to `/state/auth.json`; container restarts do not re-seed
+or re-notify old activity. Run the one-time login in the container with:
+
+```sh
+docker compose run --rm steam-feed-notifier --config /config/config.yaml login
+```
+
+Approve the printed QR code in the Steam mobile app. Compose runs as UID/GID
+1000 by default, so the host `./state` directory must be writable by that
+user for `/state/auth.json` to be created and updated. Set `UID` and `GID`
+explicitly if your host account uses different IDs.
 Compose runs with your host UID/GID by default so a private (`0600`) mounted
 `config.yaml` remains readable without running as root. Set `UID` and `GID`
 explicitly if your host account uses different IDs.
@@ -100,6 +131,11 @@ variable through when set, and it takes precedence over the YAML value. A
 single-file bind such as `./config.yaml:/config/config.yaml:ro` is not
 equivalent: Docker pins that mount to the original inode, so editor
 rename-over saves may never reach the container.
+
+If Steam rejects the stored refresh token, run `login` again. If login or
+watch reports a permission error for `/state/auth.json`, make sure the mounted
+`state` directory is writable by the compose UID/GID. Never expose refresh or
+access token values.
 
 ```sh
 docker compose logs -f steam-feed-notifier

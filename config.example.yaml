@@ -1,5 +1,6 @@
 profile: ccarpo
-steam_login_secure: "paste-cookie-value-here"
+# Optional fallback for manual authentication:
+# steam_login_secure: "paste-cookie-value-here"
 apprise_urls:
   - "ntfy://ntfy.sh/your-topic"
 poll_interval: 300
