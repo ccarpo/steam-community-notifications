@@ -45,7 +45,7 @@ def test_auth_file_defaults_beside_state_and_has_environment_override(tmp_path, 
 def test_auth_store_takes_precedence_over_static_cookie(tmp_path, monkeypatch):
     auth_file = Path(tmp_path) / "auth.json"
     TokenStore(str(auth_file)).save(
-        {"steamid": "1", "refresh_token": "refresh", "access_token": "access"}
+        {"steamid": "1", "refresh_token": "refresh", "cookie": "cookie", "cookie_expiry": 0}
     )
     config = Config(
         profile="ccarpo",

@@ -7,14 +7,14 @@ from pathlib import Path
 import pytest
 
 from steam_feed_notifier.auth import (
+    AUTH_HEADERS,
     AuthManager,
-    SteamAuthError,
     SteamAuthExpiredError,
     TokenStore,
     begin_qr_session,
     jwt_claims,
     login_via_qr,
-    mint_access_token,
+    mint_web_cookie,
 )
 from steam_feed_notifier.cli import _format_expiry, _parser
 from steam_feed_notifier.fetcher import SteamFeed, SteamFeedError
@@ -46,8 +46,16 @@ class FakeSession:
         self.get_calls = []
         self.headers = {}
 
-    def post(self, url, data, timeout):
-        self.post_calls.append((url, data, timeout))
+    def post(self, url, data=None, files=None, headers=None, timeout=None):
+        self.post_calls.append(
+            {
+                "url": url,
+                "data": data,
+                "files": files,
+                "headers": headers,
+                "timeout": timeout,
+            }
+        )
         return self.posts.pop(0)
 
     def get(self, url, cookies, timeout):
@@ -65,34 +73,26 @@ def test_token_store_missing_and_atomic_private_save(tmp_path):
     store = TokenStore(str(path))
     assert store.load() is None
 
-    store.save({"steamid": "1", "refresh_token": "refresh", "access_token": "access"})
-    assert store.load() == {
+    value = {
         "steamid": "1",
         "refresh_token": "refresh",
-        "access_token": "access",
+        "cookie": "cookie",
+        "cookie_expiry": 123,
     }
+    store.save(value)
+    assert store.load() == value
     assert os.stat(path).st_mode & 0o777 == 0o600
     assert list(path.parent.glob(".*.auth.json.*")) == []
 
 
 @pytest.mark.parametrize("eresult", ["5", "15"])
-def test_mint_rejected_refresh_token_is_expired(eresult):
+def test_auth_api_rejected_refresh_token_is_expired(eresult):
     session = FakeSession([FakeResponse({"response": {}}, {"x-eresult": eresult})])
     with pytest.raises(SteamAuthExpiredError, match="re-run login"):
-        mint_access_token(session, "refresh", "1")
+        begin_qr_session(session, "device")
 
 
-def test_auth_api_missing_token_and_other_eresult_are_errors():
-    session = FakeSession([FakeResponse({"response": {}}, {"x-eresult": "42"})])
-    with pytest.raises(SteamAuthError, match="eresult 42"):
-        mint_access_token(session, "refresh", "1")
-
-    session = FakeSession([FakeResponse({"response": {}})])
-    with pytest.raises(SteamAuthError, match="access token"):
-        mint_access_token(session, "refresh", "1")
-
-
-def test_begin_qr_session_uses_mobile_app_platform():
+def test_begin_qr_session_uses_web_browser_platform_and_headers():
     session = FakeSession(
         [
             FakeResponse(
@@ -109,11 +109,13 @@ def test_begin_qr_session_uses_mobile_app_platform():
 
     begin_qr_session(session, "device")
 
-    assert session.post_calls[0][1] == {
-        "device_friendly_name": "device",
-        "platform_type": "3",
+    call = session.post_calls[0]
+    assert call["data"] == {
+        "device_friendly_name": AUTH_HEADERS["User-Agent"],
+        "platform_type": "2",
         "website_id": "Community",
     }
+    assert call["headers"] == AUTH_HEADERS
 
 
 def test_qr_login_polls_and_handles_rotated_challenge(monkeypatch):
@@ -138,9 +140,7 @@ def test_qr_login_polls_and_handles_rotated_challenge(monkeypatch):
                     }
                 }
             ),
-            FakeResponse(
-                {"response": {"refresh_token": refresh, "access_token": "access"}}
-            ),
+            FakeResponse({"response": {"refresh_token": refresh}}),
         ]
     )
     challenges = []
@@ -148,23 +148,62 @@ def test_qr_login_polls_and_handles_rotated_challenge(monkeypatch):
 
     result = login_via_qr(session, "test-device", challenges.append, timeout=10)
 
-    assert result == ("76561198000000001", refresh, "access")
+    assert result == ("76561198000000001", refresh)
     assert challenges == ["https://qr/one", "https://qr/two"]
-    assert session.post_calls[1][1]["client_id"] == "client"
-    assert session.post_calls[2][1]["client_id"] == "rotated-client"
+    assert session.post_calls[1]["data"]["client_id"] == "client"
+    assert session.post_calls[2]["data"]["client_id"] == "rotated-client"
 
 
-def test_auth_manager_mints_near_expiry_access_token(tmp_path):
-    refresh = token(sub="1", exp=int(time.time()) + 90 * 24 * 60 * 60)
+def test_mint_web_cookie_uses_multipart_and_extracts_rotation(monkeypatch):
+    rotated = token(sub="1", exp=int(time.time()) + 100000)
+    cookie_token = token(sub="1", exp=int(time.time()) + 3600)
+    cookie = f"1%7C%7C{cookie_token}"
     session = FakeSession(
         [
             FakeResponse(
-                {
-                    "response": {
-                        "access_token": token(exp=int(time.time()) + 3600),
-                    }
-                }
-            )
+                {"transfer_info": [{"url": "https://steamcommunity.com/login", "params": {"a": "b"}}]},
+                {"set-cookie": [f"steamRefresh_steam=1%7C%7C{rotated}; Path=/"]},
+            ),
+            FakeResponse(
+                {"result": 1},
+                {"set-cookie": [f"steamLoginSecure={cookie}; Path=/"]},
+            ),
+        ]
+    )
+    monkeypatch.setattr("steam_feed_notifier.auth.time.sleep", lambda _: None)
+
+    result = mint_web_cookie(session, "refresh", "1")
+
+    assert result == (cookie, rotated)
+    finalize = session.post_calls[0]
+    assert finalize["url"].endswith("/jwt/finalizelogin")
+    assert finalize["files"]["nonce"] == (None, "refresh")
+    assert finalize["files"]["redir"] == (None, "https://steamcommunity.com/login/home/?goto=")
+    assert finalize["headers"] == AUTH_HEADERS
+    transfer = session.post_calls[1]
+    assert transfer["files"]["steamID"] == (None, "1")
+    assert transfer["files"]["a"] == (None, "b")
+
+
+def test_mint_web_cookie_error_8_is_expired():
+    session = FakeSession([FakeResponse({"success": False, "error": 8})])
+    with pytest.raises(SteamAuthExpiredError, match="re-run login"):
+        mint_web_cookie(session, "refresh", "1")
+
+
+def test_auth_manager_mints_near_expiry_cookie_and_persists_cookie(tmp_path):
+    refresh = token(sub="1", exp=int(time.time()) + 90 * 24 * 60 * 60)
+    cookie = f"1%7C%7C{token(sub='1', exp=int(time.time()) + 100)}"
+    new_cookie = f"1%7C%7C{token(sub='1', exp=int(time.time()) + 7200)}"
+    session = FakeSession(
+        [
+            FakeResponse(
+                {"transfer_info": [{"url": "https://steamcommunity.com/login", "params": {}}]}
+            ),
+            FakeResponse(
+                {"result": 1},
+                {"set-cookie": [f"steamLoginSecure={new_cookie}; Path=/"]},
+            ),
         ]
     )
     store = TokenStore(str(Path(tmp_path) / "auth.json"))
@@ -172,53 +211,53 @@ def test_auth_manager_mints_near_expiry_access_token(tmp_path):
         {
             "steamid": "1",
             "refresh_token": refresh,
-            "access_token": token(exp=int(time.time()) + 100),
+            "cookie": cookie,
+            "cookie_expiry": int(time.time()) + 100,
         }
     )
     manager = AuthManager(store, session)
 
-    assert manager.cookie().startswith("1%7C%7C")
-    assert session.post_calls[0][1]["renewal_type"] == "0"
+    assert manager.cookie() == new_cookie
+    assert store.load()["cookie"] == new_cookie
+    assert store.load()["cookie_expiry"] == jwt_claims(new_cookie.split("%7C%7C")[1])["exp"]
 
 
-def test_auth_manager_renews_refresh_token_and_persists_rotation(tmp_path):
-    refresh = token(sub="1", exp=int(time.time()) + 24 * 60 * 60)
+def test_auth_manager_persists_rotated_refresh_token(tmp_path):
+    refresh = token(sub="1", exp=int(time.time()) + 3600)
     rotated = token(sub="1", exp=int(time.time()) + 90 * 24 * 60 * 60)
-    access = token(exp=int(time.time()) + 3600)
+    new_cookie = f"1%7C%7C{token(sub='1', exp=int(time.time()) + 7200)}"
     session = FakeSession(
         [
             FakeResponse(
-                {"response": {"access_token": access, "refresh_token": rotated}}
-            )
+                {"transfer_info": [{"url": "https://steamcommunity.com/login", "params": {}}]},
+                {"set-cookie": [f"steamRefresh_steam=1%7C%7C{rotated}; Path=/"]},
+            ),
+            FakeResponse({"result": 1}, {"set-cookie": [f"steamLoginSecure={new_cookie}; Path=/"]}),
         ]
     )
     store = TokenStore(str(Path(tmp_path) / "auth.json"))
-    store.save({"steamid": "1", "refresh_token": refresh, "access_token": ""})
-    manager = AuthManager(store, session)
+    store.save({"steamid": "1", "refresh_token": refresh})
 
-    manager.cookie()
+    AuthManager(store, session).cookie()
 
-    assert session.post_calls[0][1]["renewal_type"] == "1"
     assert store.load()["refresh_token"] == rotated
-    assert store.load()["access_token"] == access
 
 
-def test_auth_manager_status_with_and_without_access_token(tmp_path):
+def test_auth_manager_status_reports_cookie_and_refresh_expiry(tmp_path):
     refresh = token(sub="1", exp=int(time.time()) + 90 * 24 * 60 * 60)
-    access = token(exp=int(time.time()) + 3600)
+    cookie = f"1%7C%7C{token(sub='1', exp=int(time.time()) + 3600)}"
     path = Path(tmp_path) / "auth.json"
     store = TokenStore(str(path))
-    store.save({"steamid": "1", "refresh_token": refresh, "access_token": access})
+    store.save({"steamid": "1", "refresh_token": refresh, "cookie": cookie})
     status = AuthManager(store, FakeSession()).status()
-    assert status["steamid"] == "1"
-    assert status["access_expiry"] == jwt_claims(access)["exp"]
-    assert status["refresh_expiry"] == jwt_claims(refresh)["exp"]
-    assert status["renewal_window"] is False
+    assert status == {
+        "steamid": "1",
+        "cookie_expiry": jwt_claims(cookie.split("%7C%7C")[1])["exp"],
+        "refresh_expiry": jwt_claims(refresh)["exp"],
+    }
 
     store.save({"steamid": "1", "refresh_token": refresh})
-    status = AuthManager(store, FakeSession()).status()
-    assert status["access_expiry"] == 0
-    assert status["refresh_expiry"] == jwt_claims(refresh)["exp"]
+    assert AuthManager(store, FakeSession()).status()["cookie_expiry"] == 0
 
 
 def test_login_parser_defaults_to_ten_minute_timeout():
@@ -249,7 +288,9 @@ def test_fetcher_refreshes_once_after_logged_out_response():
     )
     result = SteamFeed("example", provider, session=session).fetch()
 
-    assert result == [("https://steamcommunity.com/id/example/ajaxgetusernews/?l=english", "<p>ok</p>")]
+    assert result == [
+        ("https://steamcommunity.com/id/example/ajaxgetusernews/?l=english", "<p>ok</p>")
+    ]
     assert provider.refreshes == 1
     assert len(session.get_calls) == 2
 

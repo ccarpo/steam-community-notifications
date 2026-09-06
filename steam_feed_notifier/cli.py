@@ -16,8 +16,10 @@ from .auth import (
     SteamAuthError,
     SteamAuthExpiredError,
     TokenStore,
+    cookie_expiry,
     jwt_claims,
     login_via_qr,
+    mint_web_cookie,
 )
 from .config import Config
 from .fetcher import SteamFeed, SteamFeedError
@@ -76,7 +78,9 @@ def _load_html(
             store,
             session,
             on_refresh=lambda expiry: print(
-                f"minted new access token (expires {expiry.isoformat()})", flush=True
+                "minted new steamLoginSecure "
+                f"(expires {expiry.isoformat() if expiry else 'unknown'})",
+                flush=True,
             ),
         )
     elif config.steam_login_secure:
@@ -161,32 +165,40 @@ def main() -> None:
             except (ImportError, OSError, ValueError):
                 print("QR rendering is unavailable; use the URL above.", flush=True)
 
-        steamid, refresh_token, access_token = login_via_qr(
-            requests.Session(),
+        session = requests.Session()
+        steamid, refresh_token = login_via_qr(
+            session,
             args.device_name,
             show_challenge,
             timeout=args.timeout,
         )
-        TokenStore(config.auth_file).save(
+        store = TokenStore(config.auth_file)
+        store.save({"steamid": steamid, "refresh_token": refresh_token})
+        cookie, rotated_refresh = mint_web_cookie(session, refresh_token, steamid)
+        if rotated_refresh:
+            refresh_token = rotated_refresh
+        store.save(
             {
                 "steamid": steamid,
                 "refresh_token": refresh_token,
-                "access_token": access_token,
+                "cookie": cookie,
+                "cookie_expiry": cookie_expiry(cookie),
             }
         )
-        access_expiry = jwt_claims(access_token).get("exp")
         refresh_expiry = jwt_claims(refresh_token).get("exp")
         print(f"Logged in SteamID: {steamid}")
-        print(f"Access-token expiry: {_format_expiry(access_expiry)}")
+        print(
+            "Login verified: fetched a steamLoginSecure cookie "
+            f"(expires {_format_expiry(cookie_expiry(cookie))})"
+        )
         print(f"Refresh-token expiry: {_format_expiry(refresh_expiry)}")
         return
     if args.command == "auth-status":
         manager = AuthManager(TokenStore(config.auth_file), requests.Session())
         status = manager.status()
         print(f"SteamID: {status['steamid']}")
-        print(f"Access-token expiry: {_format_expiry(status['access_expiry'])}")
+        print(f"Cookie expiry: {_format_expiry(status['cookie_expiry'])}")
         print(f"Refresh-token expiry: {_format_expiry(status['refresh_expiry'])}")
-        print(f"Refresh-token renewal window active: {status['renewal_window']}")
         return
     if args.command == "debug":
         htmls = _load_html(config, args.fixture_dir, args.html)
