@@ -25,9 +25,9 @@ steam-feed-notifier --config config.yaml login
 
 Scan and approve the printed QR code in the Steam mobile app. The resulting
 `auth.json` is stored beside `state_file` (the default is
-`~/.local/state/steam-feed-notifier/auth.json`). Access tokens are renewed
-automatically, and the refresh token is renewed and persisted before its own
-expiry. Check token expiries with:
+`~/.local/state/steam-feed-notifier/auth.json`). The `steamLoginSecure` cookie
+is renewed automatically, and rotated refresh tokens are persisted. Check
+authentication expiries with:
 
 ```sh
 steam-feed-notifier --config config.yaml auth-status
@@ -134,8 +134,8 @@ rename-over saves may never reach the container.
 
 If Steam rejects the stored refresh token, run `login` again. If login or
 watch reports a permission error for `/state/auth.json`, make sure the mounted
-`state` directory is writable by the compose UID/GID. Never expose refresh or
-access token values.
+`state` directory is writable by the compose UID/GID. Never expose refresh-token
+or `steamLoginSecure` cookie values.
 
 ```sh
 docker compose logs -f steam-feed-notifier
