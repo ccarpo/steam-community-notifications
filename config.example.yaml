@@ -10,3 +10,12 @@ exclude_kinds: []
 max_notifications_per_poll: 20
 dry_run: false
 seed_days: 2
+# Optional title prefixes; set a value to "" to disable one.
+# title_prefixes:
+#   group_announcement: "Announcement"
+#   rollup_achievement: "Achievement"
+#   game_purchase: "New game"
+#   rollup_played: "Played"
+#   rollup_wishlist: "Wishlist"
+#   screenshot: "Screenshots"
+#   first_played: "First played"

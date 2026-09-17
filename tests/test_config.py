@@ -73,3 +73,21 @@ def test_missing_authentication_names_login_command(tmp_path):
     )
     with pytest.raises(SteamAuthError, match="login"):
         cli._load_html(config)
+
+
+def test_title_prefixes_override_defaults_and_validate_mapping(tmp_path):
+    path = Path(tmp_path) / "config.yaml"
+    path.write_text(
+        "profile: ccarpo\n"
+        "title_prefixes:\n"
+        "  game_purchase: New purchase\n"
+        "  screenshot: ''\n"
+    )
+    config = Config.load(str(path))
+    assert config.title_prefixes["game_purchase"] == "New purchase"
+    assert config.title_prefixes["screenshot"] == ""
+    assert config.title_prefixes["rollup_played"] == "Played"
+
+    path.write_text("profile: ccarpo\ntitle_prefixes: []\n")
+    with pytest.raises(ValueError, match="title_prefixes"):
+        Config.load(str(path))

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, NavigableString, Tag
@@ -19,6 +19,8 @@ class Event:
     link: str
     day_timestamp: int
     notification_title: str = ""
+    achievements: list[str] = field(default_factory=list)
+    game: str = ""
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -118,6 +120,14 @@ def _app_anchors(node: Tag) -> list[Tag]:
     ]
 
 
+def _achievements(node: Tag) -> list[str]:
+    return [
+        re.sub(r"\s+", " ", image["title"]).strip()
+        for image in node.select("img[title]")
+        if image.get("title", "").strip()
+    ]
+
+
 def _purchase_game(node: Tag) -> tuple[str, str]:
     anchors = [
         anchor
@@ -160,32 +170,34 @@ def _announcement_fields(node: Tag) -> tuple[str, str, str]:
     return game, headline, link
 
 
-def _structured_fields(node: Tag, kind: str, actor: str) -> tuple[str, str, str]:
+def _structured_fields(
+    node: Tag, kind: str, actor: str
+) -> tuple[str, str, str, list[str], str]:
     if kind == "rollup_played":
         apps = _app_anchors(node)
-        game = _text(apps[0]) if apps else ""
+        games = [_text(app) for app in apps]
+        game = games[0] if games else ""
         text = _text(node)
-        if actor:
-            text = re.sub(rf"^{re.escape(actor)}\s+", "", text)
-        if game:
-            text = text.replace(game, "", 1)
-        body = re.sub(r"\s+", " ", text).strip()
-        body = body[:1].upper() + body[1:] if body else "Played."
-        return _title(actor, game), body, ""
+        if "for the first time" in text.lower() and games:
+            if len(games) == 1:
+                body = "Played for the first time."
+            else:
+                body = f"Played {', '.join(games[:-1])} and {games[-1]} for the first time."
+        elif games:
+            body = f"Played {', '.join(games)}."
+        else:
+            body = "Played."
+        return _title(actor, game), body, "", [], game
 
     if kind == "rollup_wishlist":
         games = [_text(anchor) for anchor in _app_anchors(node)]
-        return _title(actor, "Wishlist"), ", ".join(games), ""
+        return _title(actor, "Wishlist"), ", ".join(games), "", [], ""
 
     if kind == "rollup_achievement":
         apps = _app_anchors(node)
         game = _text(apps[0]) if apps else ""
-        achievements = [
-            re.sub(r"\s+", " ", image["title"]).strip()
-            for image in node.select("img[title]")
-            if image.get("title", "").strip()
-        ]
-        return _title(actor, game), "; ".join(achievements), ""
+        achievements = _achievements(node)
+        return _title(actor, game), "; ".join(achievements), "", achievements, game
 
     if kind == "game_purchase":
         game, app_link = _purchase_game(node)
@@ -194,7 +206,7 @@ def _structured_fields(node: Tag, kind: str, actor: str) -> tuple[str, str, str]
         body = "Now owns it."
         if description:
             body += f" {_short(description, 200)}"
-        return _title(actor, game), body, _purchase_link(node) or app_link
+        return _title(actor, game), body, _purchase_link(node) or app_link, [], ""
 
     if kind == "group_announcement":
         game, headline, announcement_link = _announcement_fields(node)
@@ -207,6 +219,8 @@ def _structured_fields(node: Tag, kind: str, actor: str) -> tuple[str, str, str]
             _title(game, "Announcement"),
             _short(body, MAX_ANNOUNCEMENT_BODY_LENGTH),
             announcement_link,
+            [],
+            "",
         )
 
     if kind == "screenshot":
@@ -227,9 +241,9 @@ def _structured_fields(node: Tag, kind: str, actor: str) -> tuple[str, str, str]
             if screenshot
             else ""
         )
-        return _title(actor, game), body, link
+        return _title(actor, game), body, link, [], ""
 
-    return _title(actor or "Activity"), "", ""
+    return _title(actor or "Activity"), "", "", [], ""
 
 
 def _kind(node: Tag, text: str) -> str:
@@ -265,11 +279,7 @@ def _summary(node: Tag, kind: str, max_length: int = MAX_SUMMARY_LENGTH) -> str:
     else:
         summary = _text(clean)
     if kind == "rollup_achievement":
-        titles = [
-            re.sub(r"\s+", " ", image["title"]).strip()
-            for image in node.select("img[title]")
-            if image.get("title", "").strip()
-        ]
+        titles = _achievements(node)
         additions = [title for title in titles if title not in summary]
         if additions:
             summary = f"{summary} {'; '.join(additions)}"
@@ -302,7 +312,13 @@ def parse_events(html: str) -> list[Event]:
             if not stable_id_summary:
                 continue
             actor, profile = _actor(node)
-            title, structured_summary, structured_link = _structured_fields(node, kind, actor)
+            (
+                title,
+                structured_summary,
+                structured_link,
+                achievements,
+                game,
+            ) = _structured_fields(node, kind, actor)
             summary = structured_summary or stable_id_summary
             if not structured_summary:
                 title = _title(actor or "Activity")
@@ -320,6 +336,8 @@ def parse_events(html: str) -> list[Event]:
                     link,
                     timestamp,
                     title,
+                    achievements,
+                    game,
                 )
             )
     return events

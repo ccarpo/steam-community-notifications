@@ -5,6 +5,16 @@ from typing import Any
 
 import yaml
 
+DEFAULT_TITLE_PREFIXES = {
+    "group_announcement": "Announcement",
+    "rollup_achievement": "Achievement",
+    "game_purchase": "New game",
+    "rollup_played": "Played",
+    "rollup_wishlist": "Wishlist",
+    "screenshot": "Screenshots",
+    "first_played": "First played",
+}
+
 
 @dataclass
 class Config:
@@ -19,10 +29,21 @@ class Config:
     max_notifications_per_poll: int = 20
     dry_run: bool = False
     seed_days: int = 2
+    title_prefixes: dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_TITLE_PREFIXES)
+    )
 
     def __post_init__(self):
         if not self.auth_file:
             self.auth_file = str(Path(self.state_file).expanduser().parent / "auth.json")
+        if not isinstance(self.title_prefixes, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in self.title_prefixes.items()
+        ):
+            raise ValueError("title_prefixes must be a mapping of strings to strings")
+        merged = dict(DEFAULT_TITLE_PREFIXES)
+        merged.update(self.title_prefixes)
+        self.title_prefixes = merged
 
     @classmethod
     def load(cls, path: str) -> "Config":
@@ -40,6 +61,12 @@ class Config:
         auth_file = str(
             raw.get("auth_file", Path(state_file).expanduser().parent / "auth.json")
         )
+        title_prefixes = raw.get("title_prefixes", {})
+        if not isinstance(title_prefixes, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in title_prefixes.items()
+        ):
+            raise ValueError("title_prefixes must be a mapping of strings to strings")
         return cls(
             profile=str(profile),
             steam_login_secure=str(raw.get("steam_login_secure", "")).removeprefix(
@@ -54,4 +81,5 @@ class Config:
             max_notifications_per_poll=int(raw.get("max_notifications_per_poll", 20)),
             dry_run=bool(raw.get("dry_run", False)),
             seed_days=int(raw.get("seed_days", raw.get("initial_days", 2))),
+            title_prefixes=title_prefixes,
         )

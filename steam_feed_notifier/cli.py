@@ -118,12 +118,34 @@ def run_once(config: Config, first_run_notify: bool = False, fixture_dir: str | 
     events = [e for e in events if (not config.include_kinds or e.kind in config.include_kinds)
               and e.kind not in config.exclude_kinds]
     unseen = [e for e in events if e.id not in set(state.ids)]
+    filtered_unseen = []
+    for event in unseen:
+        if event.kind == "rollup_achievement" and event.achievements:
+            key = f"{event.day_timestamp}|{event.actor_profile or event.actor}|{event.game}"
+            fresh = state.unseen_achievements(key, event.achievements)
+            if not fresh:
+                state.add([event.id])
+                continue
+            event.summary = "; ".join(fresh)
+            event.achievements = fresh
+        filtered_unseen.append(event)
+    unseen = filtered_unseen
     if is_first_run and not first_run_notify:
         state.add([e.id for e in events])
+        for event in events:
+            if event.kind == "rollup_achievement" and event.achievements:
+                key = f"{event.day_timestamp}|{event.actor_profile or event.actor}|{event.game}"
+                state.add_achievements(key, event.achievements)
         print(f"Seeded {len(events)} events silently.")
         return
     selected = unseen[: config.max_notifications_per_poll]
     pending = selected
+    def on_success(event):
+        state.add([event.id])
+        if event.kind == "rollup_achievement" and event.achievements:
+            key = f"{event.day_timestamp}|{event.actor_profile or event.actor}|{event.game}"
+            state.add_achievements(key, event.achievements)
+
     for attempt in range(2):
         if not pending:
             break
@@ -132,7 +154,8 @@ def run_once(config: Config, first_run_notify: bool = False, fixture_dir: str | 
                 pending,
                 config.apprise_urls,
                 config.dry_run,
-                on_success=lambda event: state.add([event.id]),
+                on_success=on_success,
+                prefixes=config.title_prefixes,
             )
         except NotificationError as exc:
             pending = exc.failed_events

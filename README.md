@@ -47,6 +47,7 @@ The included `ntfy` example is a convenient phone target: install the ntfy
 app, subscribe to a private topic, and set
 `ntfy://ntfy.sh/your-private-topic` in `apprise_urls`. Other Apprise URLs
 support Telegram, Pushover, Discord, and many more.
+ntfy notifications link directly to the event when tapped.
 
 The first run seeds existing activity silently. Use `--notify-first-run` if
 backlog notifications are desired. Normal polling uses only the current day;
