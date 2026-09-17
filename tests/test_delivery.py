@@ -10,7 +10,7 @@ def test_delivery_failure_does_not_repeat_successful_events(tmp_path, monkeypatc
     calls: list[list[str]] = []
     failed_id: str | None = None
 
-    def fake_notify(events, urls, dry_run=False, on_success=None):
+    def fake_notify(events, urls, dry_run=False, on_success=None, prefixes=None):
         nonlocal failed_id
         calls.append([event.id for event in events])
         failures = []

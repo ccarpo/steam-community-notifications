@@ -77,6 +77,8 @@ def test_real_corpus_structured_notification_fields():
         "Friend 003 · PARKSIDE: DECAYED SOUL MANIPULATION"
     )
     assert achievement.summary == "Underwater Adventure Flood Ozz."
+    assert achievement.achievements == ["Underwater Adventure Flood Ozz."]
+    assert achievement.game == "PARKSIDE: DECAYED SOUL MANIPULATION"
     assert achievement.link == "https://steamcommunity.com/app/2530250"
 
     purchase = next(
@@ -116,6 +118,18 @@ def test_real_corpus_structured_notification_fields():
         "https://steamcommunity.com/sharedfiles/filedetails/?id=3779145017"
     )
     assert all(len(event.notification_title) <= 60 for event in events)
+
+
+def test_played_rollup_lists_multiple_games_without_empty_separator():
+    event = next(
+        event
+        for event in parse_events((FIXTURES / "day4.html").read_text())
+        if event.actor == "Friend 011" and event.kind == "rollup_played"
+    )
+    assert event.game == "Guildrun Demo"
+    assert event.summary == (
+        "Played Guildrun Demo, He is Coming Demo and Lootbound Demo for the first time."
+    )
 
 
 def test_structured_notifications_keep_unknown_activity_fallback():
