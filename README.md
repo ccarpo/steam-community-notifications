@@ -17,17 +17,26 @@ cp config.example.yaml config.yaml
 steam-feed-notifier --config config.yaml once
 ```
 
-Authenticate once with Steam's QR flow:
+Authenticate once with Steam's QR flow. The default MobileApp platform uses
+renewable refresh tokens:
 
 ```sh
 steam-feed-notifier --config config.yaml login
 ```
 
-Scan and approve the printed QR code in the Steam mobile app. The resulting
-`auth.json` is stored beside `state_file` (the default is
+Scan and approve the printed QR code in the Steam mobile app. If the app
+refuses to load the QR, use the WebBrowser fallback:
+
+```sh
+steam-feed-notifier --config config.yaml login --platform web
+```
+
+WebBrowser refresh tokens cannot be renewed, so that login must be repeated
+when the refresh token expires (around the expiry shown by `auth-status`). The
+resulting `auth.json` is stored beside `state_file` (the default is
 `~/.local/state/steam-feed-notifier/auth.json`). The `steamLoginSecure` cookie
-is renewed automatically, and rotated refresh tokens are persisted. Check
-authentication expiries with:
+is renewed automatically; MobileApp refresh tokens are rotated and persisted.
+Check the platform and authentication expiries with:
 
 ```sh
 steam-feed-notifier --config config.yaml auth-status
@@ -67,7 +76,9 @@ steam-feed-notifier --config config.yaml auth-status
 
 `watch` uses a minutes-scale interval, jitter, and exponential backoff for
 transient failures. Empty HTTP-200 bodies are treated as logged out and report
-“cookie expired, grab a fresh steamLoginSecure”.
+“cookie expired, grab a fresh steamLoginSecure”. By default, distinct poll
+errors and recovery are sent as notifications; set `notify_errors: false` to
+disable them.
 
 ## Continuous operation
 

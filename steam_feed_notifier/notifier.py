@@ -88,6 +88,33 @@ def _prefix(event: Event, prefixes: dict[str, str] | None) -> str:
     return prefixes.get(event.kind, "")
 
 
+def send_message(title: str, body: str, urls: list[str], link: str = "") -> None:
+    ntfy_urls = [url for url in urls if _is_ntfy(url)]
+    apprise_urls = [url for url in urls if not _is_ntfy(url)]
+    if not urls:
+        raise RuntimeError("No apprise_urls configured")
+    failures: list[str] = []
+    for url in ntfy_urls:
+        try:
+            _send_ntfy(url, title, body, link)
+        except Exception as exc:  # noqa: BLE001 - isolate each target
+            failures.append(f"ntfy target failed: {type(exc).__name__}")
+    if apprise_urls:
+        try:
+            apobj = apprise.Apprise()
+            for url in apprise_urls:
+                apobj.add(url)
+            apprise_body = body + (f"\n{link}" if link else "")
+            delivered = apobj.notify(body=apprise_body, title=title)
+        except Exception as exc:  # noqa: BLE001 - isolate the Apprise targets
+            failures.append(f"Apprise targets failed: {type(exc).__name__}")
+        else:
+            if not delivered:
+                failures.append("Apprise returned failure")
+    if failures:
+        raise RuntimeError("Notification delivery failures: " + " | ".join(failures))
+
+
 def notify(
     events: list[Event],
     urls: list[str],
@@ -95,11 +122,6 @@ def notify(
     on_success=None,
     prefixes: dict[str, str] | None = None,
 ) -> None:
-    ntfy_urls = [url for url in urls if _is_ntfy(url)]
-    apprise_urls = [url for url in urls if not _is_ntfy(url)]
-    apobj = apprise.Apprise()
-    for url in apprise_urls:
-        apobj.add(url)
     failures: list[str] = []
     failed_events: list[Event] = []
     for event in events:
@@ -116,24 +138,16 @@ def notify(
             failures.append(f"{title}: No apprise_urls configured")
             failed_events.append(event)
             continue
-        event_failures: list[str] = []
-        for url in ntfy_urls:
-            try:
-                _send_ntfy(url, title, _body(event, include_link=False), event.link)
-            except Exception as exc:  # noqa: BLE001 - isolate one failed event delivery
-                event_failures.append(f"{url}: {exc}")
-        if apprise_urls:
-            try:
-                delivered = apobj.notify(body=_body(event), title=title)
-            except Exception as exc:  # noqa: BLE001 - isolate one failed event delivery
-                event_failures.append(str(exc))
-            else:
-                if not delivered:
-                    event_failures.append("Apprise returned failure")
-        if event_failures:
-            failures.append(f"{title}: {' | '.join(event_failures)}")
+        delivery_body = _body(event)
+        if event.link:
+            delivery_body = delivery_body[: -(len(event.link) + 1)]
+        try:
+            send_message(title, delivery_body, urls, event.link)
+        except RuntimeError as exc:
+            failures.append(f"{title}: {exc}")
             failed_events.append(event)
-        elif on_success:
-            on_success(event)
+        else:
+            if on_success:
+                on_success(event)
     if failures:
         raise NotificationError("Notification failures: " + " | ".join(failures), failed_events)

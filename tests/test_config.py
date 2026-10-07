@@ -91,3 +91,12 @@ def test_title_prefixes_override_defaults_and_validate_mapping(tmp_path):
     path.write_text("profile: ccarpo\ntitle_prefixes: []\n")
     with pytest.raises(ValueError, match="title_prefixes"):
         Config.load(str(path))
+
+
+def test_notify_errors_defaults_to_enabled_and_can_be_disabled(tmp_path):
+    path = Path(tmp_path) / "config.yaml"
+    path.write_text("profile: ccarpo\n")
+    assert Config.load(str(path)).notify_errors is True
+
+    path.write_text("profile: ccarpo\nnotify_errors: false\n")
+    assert Config.load(str(path)).notify_errors is False

@@ -8,6 +8,7 @@ import pytest
 
 from steam_feed_notifier.auth import (
     AUTH_HEADERS,
+    MOBILE_API_HEADERS,
     AuthManager,
     SteamAuthExpiredError,
     TokenStore,
@@ -15,6 +16,7 @@ from steam_feed_notifier.auth import (
     jwt_claims,
     login_via_qr,
     mint_web_cookie,
+    mobile_cookie,
 )
 from steam_feed_notifier.cli import _format_expiry, _parser
 from steam_feed_notifier.fetcher import SteamFeed, SteamFeedError
@@ -46,13 +48,14 @@ class FakeSession:
         self.get_calls = []
         self.headers = {}
 
-    def post(self, url, data=None, files=None, headers=None, timeout=None):
+    def post(self, url, data=None, files=None, headers=None, params=None, timeout=None):
         self.post_calls.append(
             {
                 "url": url,
                 "data": data,
                 "files": files,
                 "headers": headers,
+                "params": params,
                 "timeout": timeout,
             }
         )
@@ -92,7 +95,7 @@ def test_auth_api_rejected_refresh_token_is_expired(eresult):
         begin_qr_session(session, "device")
 
 
-def test_begin_qr_session_uses_web_browser_platform_and_headers():
+def test_begin_qr_session_encodes_mobile_device_details_and_headers():
     session = FakeSession(
         [
             FakeResponse(
@@ -107,7 +110,36 @@ def test_begin_qr_session_uses_web_browser_platform_and_headers():
         ]
     )
 
-    begin_qr_session(session, "device")
+    begin_qr_session(session, "test-device")
+
+    call = session.post_calls[0]
+    assert call["data"] is None
+    assert call["files"] == {
+        "input_protobuf_encoded": (None, "Gh0KC3Rlc3QtZGV2aWNlEAMYjPz/////////ASCQBA==")
+    }
+    assert base64.b64decode(call["files"]["input_protobuf_encoded"][1]).hex() == (
+        "1a1d0a0b746573742d6465766963651003188cfcffffffffffffff01209004"
+    )
+    assert call["params"] == {"format": "json"}
+    assert call["headers"] == MOBILE_API_HEADERS
+
+
+def test_begin_qr_session_web_fallback_keeps_browser_request():
+    session = FakeSession(
+        [
+            FakeResponse(
+                {
+                    "response": {
+                        "client_id": "client",
+                        "challenge_url": "https://qr",
+                        "request_id": "request",
+                    }
+                }
+            )
+        ]
+    )
+
+    begin_qr_session(session, "device", platform="web")
 
     call = session.post_calls[0]
     assert call["data"] == {
@@ -120,6 +152,7 @@ def test_begin_qr_session_uses_web_browser_platform_and_headers():
 
 def test_qr_login_polls_and_handles_rotated_challenge(monkeypatch):
     refresh = token(sub="76561198000000001", exp=int(time.time()) + 100000)
+    access = token(sub="76561198000000001", exp=int(time.time()) + 3600)
     session = FakeSession(
         [
             FakeResponse(
@@ -140,7 +173,9 @@ def test_qr_login_polls_and_handles_rotated_challenge(monkeypatch):
                     }
                 }
             ),
-            FakeResponse({"response": {"refresh_token": refresh}}),
+            FakeResponse(
+                {"response": {"refresh_token": refresh, "access_token": access}}
+            ),
         ]
     )
     challenges = []
@@ -148,8 +183,10 @@ def test_qr_login_polls_and_handles_rotated_challenge(monkeypatch):
 
     result = login_via_qr(session, "test-device", challenges.append, timeout=10)
 
-    assert result == ("76561198000000001", refresh)
+    assert result == ("76561198000000001", refresh, access)
     assert challenges == ["https://qr/one", "https://qr/two"]
+    assert session.post_calls[0]["headers"] == MOBILE_API_HEADERS
+    assert session.post_calls[1]["headers"] == MOBILE_API_HEADERS
     assert session.post_calls[1]["data"]["client_id"] == "client"
     assert session.post_calls[2]["data"]["client_id"] == "rotated-client"
 
@@ -218,6 +255,7 @@ def test_auth_manager_mints_near_expiry_cookie_and_persists_cookie(tmp_path):
     manager = AuthManager(store, session)
 
     assert manager.cookie() == new_cookie
+    assert session.post_calls[0]["url"].endswith("/jwt/finalizelogin")
     assert store.load()["cookie"] == new_cookie
     assert store.load()["cookie_expiry"] == jwt_claims(new_cookie.split("%7C%7C")[1])["exp"]
 
@@ -252,18 +290,84 @@ def test_auth_manager_status_reports_cookie_and_refresh_expiry(tmp_path):
     status = AuthManager(store, FakeSession()).status()
     assert status == {
         "steamid": "1",
+        "platform": "web",
         "cookie_expiry": jwt_claims(cookie.split("%7C%7C")[1])["exp"],
         "refresh_expiry": jwt_claims(refresh)["exp"],
     }
 
     store.save({"steamid": "1", "refresh_token": refresh})
     assert AuthManager(store, FakeSession()).status()["cookie_expiry"] == 0
+    assert AuthManager(store, FakeSession()).status()["platform"] == "web"
+
+
+@pytest.mark.parametrize(("refresh_days", "renewal_type"), [(59, "1"), (61, "0")])
+def test_mobile_auth_manager_renews_access_token_at_sixty_day_window(
+    tmp_path,
+    refresh_days,
+    renewal_type,
+):
+    refresh = token(sub="1", exp=int(time.time()) + refresh_days * 24 * 60 * 60)
+    old_cookie = mobile_cookie("1", token(sub="1", exp=int(time.time()) + 100))
+    access = token(sub="1", exp=int(time.time()) + 7200)
+    session = FakeSession([FakeResponse({"response": {"access_token": access}})])
+    store = TokenStore(str(Path(tmp_path) / "auth.json"))
+    store.save(
+        {
+            "platform": "mobile",
+            "steamid": "1",
+            "refresh_token": refresh,
+            "cookie": old_cookie,
+            "cookie_expiry": int(time.time()) + 100,
+        }
+    )
+
+    assert AuthManager(store, session).cookie() == mobile_cookie("1", access)
+
+    call = session.post_calls[0]
+    assert call["url"].endswith("/GenerateAccessTokenForApp/v1/")
+    assert call["data"]["renewal_type"] == renewal_type
+    assert call["headers"] == MOBILE_API_HEADERS
+
+
+def test_mobile_auth_manager_persists_rotated_refresh_before_new_cookie(tmp_path):
+    refresh = token(sub="1", exp=int(time.time()) + 30 * 24 * 60 * 60)
+    rotated = token(sub="1", exp=int(time.time()) + 120 * 24 * 60 * 60)
+    access = token(sub="1", exp=int(time.time()) + 7200)
+    old_cookie = mobile_cookie("1", token(sub="1", exp=int(time.time()) + 100))
+    session = FakeSession(
+        [
+            FakeResponse(
+                {"response": {"access_token": access, "refresh_token": rotated}}
+            )
+        ]
+    )
+    store = TokenStore(str(Path(tmp_path) / "auth.json"))
+    store.save(
+        {
+            "platform": "mobile",
+            "steamid": "1",
+            "refresh_token": refresh,
+            "cookie": old_cookie,
+            "cookie_expiry": int(time.time()) + 100,
+        }
+    )
+    saved = []
+    save = store.save
+    store.save = lambda value: (saved.append(dict(value)), save(value))[1]
+
+    assert AuthManager(store, session).cookie() == mobile_cookie("1", access)
+
+    assert saved[0]["refresh_token"] == rotated
+    assert saved[0]["cookie"] == old_cookie
+    assert saved[1]["cookie"] == mobile_cookie("1", access)
 
 
 def test_login_parser_defaults_to_ten_minute_timeout():
     args = _parser().parse_args(["login"])
     assert args.timeout == 600
+    assert args.platform == "mobile"
     assert _parser().parse_args(["login", "--timeout", "42"]).timeout == 42
+    assert _parser().parse_args(["login", "--platform", "web"]).platform == "web"
     assert _format_expiry(0) == "unknown"
     assert _format_expiry(None) == "unknown"
 

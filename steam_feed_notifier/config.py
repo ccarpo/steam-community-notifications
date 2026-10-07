@@ -32,6 +32,7 @@ class Config:
     title_prefixes: dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_TITLE_PREFIXES)
     )
+    notify_errors: bool = True
 
     def __post_init__(self):
         if not self.auth_file:
@@ -82,4 +83,5 @@ class Config:
             dry_run=bool(raw.get("dry_run", False)),
             seed_days=int(raw.get("seed_days", raw.get("initial_days", 2))),
             title_prefixes=title_prefixes,
+            notify_errors=bool(raw.get("notify_errors", True)),
         )

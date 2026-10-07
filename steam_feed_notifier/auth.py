@@ -12,7 +12,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import requests
 
@@ -35,6 +35,14 @@ AUTH_HEADERS = {
     "Origin": "https://steamcommunity.com",
     "Referer": "https://steamcommunity.com/",
     "User-Agent": WEB_USER_AGENT,
+}
+MOBILE_API_HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Sec-Fetch-Site": "cross-site",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+    "User-Agent": "okhttp/4.9.2",
+    "Cookie": "mobileClient=android; mobileClientVersion=777777 3.10.3",
 }
 
 
@@ -81,11 +89,17 @@ def _post(
     session: requests.Session,
     operation: str,
     data: dict[str, str],
+    *,
+    headers: dict[str, str] | None = None,
+    files: dict[str, tuple[None, str]] | None = None,
+    params: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], Any]:
     response = session.post(
         f"{AUTHENTICATION_URL}{operation}/v1/",
-        data=data,
-        headers=AUTH_HEADERS,
+        data=data or None,
+        files=files,
+        params=params,
+        headers=headers or AUTH_HEADERS,
         timeout=30,
     )
     _raise_for_status(response)
@@ -108,17 +122,62 @@ def _post(
     return result, response
 
 
-def begin_qr_session(session: requests.Session, device_name: str) -> dict[str, Any]:
-    del device_name
-    result, _ = _post(
-        session,
-        "BeginAuthSessionViaQR",
-        {
-            "device_friendly_name": WEB_USER_AGENT,
-            "platform_type": "2",
-            "website_id": "Community",
-        },
+def _varint(value: int) -> bytes:
+    value &= (1 << 64) - 1
+    encoded = bytearray()
+    while value > 0x7F:
+        encoded.append((value & 0x7F) | 0x80)
+        value >>= 7
+    encoded.append(value)
+    return bytes(encoded)
+
+
+def _protobuf_varint(field_number: int, value: int) -> bytes:
+    return _varint(field_number << 3) + _varint(value)
+
+
+def _protobuf_string(field_number: int, value: str) -> bytes:
+    encoded = value.encode("utf-8")
+    return _varint((field_number << 3) | 2) + _varint(len(encoded)) + encoded
+
+
+def _mobile_qr_request(device_name: str) -> str:
+    details = (
+        _protobuf_string(1, device_name)
+        + _protobuf_varint(2, 3)
+        + _protobuf_varint(3, -500)
+        + _protobuf_varint(4, 528)
     )
+    request = _varint((3 << 3) | 2) + _varint(len(details)) + details
+    return base64.b64encode(request).decode("ascii")
+
+
+def begin_qr_session(
+    session: requests.Session,
+    device_name: str,
+    platform: str = "mobile",
+) -> dict[str, Any]:
+    if platform == "mobile":
+        result, _ = _post(
+            session,
+            "BeginAuthSessionViaQR",
+            {},
+            headers=MOBILE_API_HEADERS,
+            files=_multipart({"input_protobuf_encoded": _mobile_qr_request(device_name)}),
+            params={"format": "json"},
+        )
+    elif platform == "web":
+        result, _ = _post(
+            session,
+            "BeginAuthSessionViaQR",
+            {
+                "device_friendly_name": WEB_USER_AGENT,
+                "platform_type": "2",
+                "website_id": "Community",
+            },
+        )
+    else:
+        raise ValueError("platform must be 'mobile' or 'web'")
     required = ("client_id", "challenge_url", "request_id")
     if any(not result.get(key) for key in required):
         raise SteamAuthError("Steam did not return a usable QR login challenge")
@@ -129,13 +188,46 @@ def poll_auth_session(
     session: requests.Session,
     client_id: str,
     request_id: str,
+    platform: str = "mobile",
 ) -> dict[str, Any]:
+    if platform not in {"mobile", "web"}:
+        raise ValueError("platform must be 'mobile' or 'web'")
     result, _ = _post(
         session,
         "PollAuthSessionStatus",
         {"client_id": str(client_id), "request_id": request_id},
+        headers=MOBILE_API_HEADERS if platform == "mobile" else AUTH_HEADERS,
     )
     return result
+
+
+def mint_access_token(
+    session: requests.Session,
+    refresh_token: str,
+    steamid: str,
+    renew: bool = False,
+) -> tuple[str, str | None]:
+    result, _ = _post(
+        session,
+        "GenerateAccessTokenForApp",
+        {
+            "refresh_token": refresh_token,
+            "steamid": str(steamid),
+            "renewal_type": "1" if renew else "0",
+        },
+        headers=MOBILE_API_HEADERS,
+    )
+    access_token = result.get("access_token")
+    if not access_token:
+        raise SteamAuthError("Steam did not return an access token")
+    new_refresh_token = result.get("refresh_token")
+    return str(access_token), (
+        str(new_refresh_token) if isinstance(new_refresh_token, str) else None
+    )
+
+
+def mobile_cookie(steamid: str, access_token: str) -> str:
+    return quote(f"{steamid}||{access_token}", safe="")
 
 
 def _cookie_headers(response: Any) -> list[str]:
@@ -262,26 +354,36 @@ def login_via_qr(
     device_name: str,
     on_challenge: Callable[[str], None],
     timeout: int = 180,
-) -> tuple[str, str]:
-    challenge = begin_qr_session(session, device_name)
+    platform: str = "mobile",
+) -> tuple[str, str, str | None]:
+    if platform not in {"mobile", "web"}:
+        raise ValueError("platform must be 'mobile' or 'web'")
+    challenge = begin_qr_session(session, device_name, platform)
     on_challenge(str(challenge["challenge_url"]))
     client_id = str(challenge["client_id"])
     request_id = str(challenge["request_id"])
     interval = max(1, int(float(challenge.get("interval", 5))))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        status = poll_auth_session(session, client_id, request_id)
+        status = poll_auth_session(session, client_id, request_id, platform)
         if status.get("new_client_id"):
             client_id = str(status["new_client_id"])
         if status.get("new_challenge_url"):
             on_challenge(str(status["new_challenge_url"]))
         refresh_token = status.get("refresh_token")
         if refresh_token:
+            access_token = status.get("access_token")
+            if platform == "mobile" and not access_token:
+                raise SteamAuthError("Steam did not return an access token")
             claims = jwt_claims(str(refresh_token))
             steamid = claims.get("sub")
             if not steamid:
                 raise SteamAuthError("Steam refresh token has no steamid claim")
-            return str(steamid), str(refresh_token)
+            return (
+                str(steamid),
+                str(refresh_token),
+                str(access_token) if access_token else None,
+            )
         time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
     raise SteamAuthError("timed out waiting for Steam QR login approval")
 
@@ -309,7 +411,13 @@ class TokenStore:
             raise SteamAuthError(f"auth store {self.path} is not a JSON object")
         return {
             key: value[key]
-            for key in ("steamid", "refresh_token", "cookie", "cookie_expiry")
+            for key in (
+                "steamid",
+                "refresh_token",
+                "cookie",
+                "cookie_expiry",
+                "platform",
+            )
             if value.get(key) is not None
         }
 
@@ -366,15 +474,37 @@ class AuthManager:
 
     def _mint(self, force: bool = False) -> None:
         steamid, refresh_token = self._require_refresh()
+        platform = str(self.tokens.get("platform", "web"))
         stored_cookie = str(self.tokens.get("cookie", ""))
         expiry = cookie_expiry(stored_cookie)
         if not force and expiry > int(time.time()) + 300:
             return
-        cookie, new_refresh_token = mint_web_cookie(self.session, refresh_token, steamid)
+        if platform == "mobile":
+            refresh_expiry = self._expiry(refresh_token)
+            renew = refresh_expiry <= int(time.time()) + 60 * 24 * 60 * 60
+            access_token, new_refresh_token = mint_access_token(
+                self.session,
+                refresh_token,
+                steamid,
+                renew=renew,
+            )
+            if new_refresh_token:
+                self.tokens["refresh_token"] = new_refresh_token
+                self.store.save(self.tokens)
+            cookie = mobile_cookie(steamid, access_token)
+        elif platform == "web":
+            cookie, new_refresh_token = mint_web_cookie(
+                self.session,
+                refresh_token,
+                steamid,
+            )
+            if new_refresh_token:
+                self.tokens["refresh_token"] = new_refresh_token
+        else:
+            raise SteamAuthError("auth store has an unsupported platform; run login")
+        self.tokens.setdefault("platform", platform)
         self.tokens["cookie"] = cookie
         self.tokens["cookie_expiry"] = cookie_expiry(cookie)
-        if new_refresh_token:
-            self.tokens["refresh_token"] = new_refresh_token
         self.store.save(self.tokens)
         if self.on_refresh:
             expiry = self.tokens["cookie_expiry"]
@@ -397,6 +527,7 @@ class AuthManager:
         steamid, refresh_token = self._require_refresh()
         return {
             "steamid": steamid,
+            "platform": str(self.tokens.get("platform", "web")),
             "cookie_expiry": cookie_expiry(str(self.tokens.get("cookie", ""))),
             "refresh_expiry": self._expiry(refresh_token),
         }
