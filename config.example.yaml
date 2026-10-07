@@ -10,6 +10,7 @@ exclude_kinds: []
 max_notifications_per_poll: 20
 dry_run: false
 seed_days: 2
+notify_errors: true
 # Optional title prefixes; set a value to "" to disable one.
 # title_prefixes:
 #   group_announcement: "Announcement"

@@ -20,10 +20,11 @@ from .auth import (
     jwt_claims,
     login_via_qr,
     mint_web_cookie,
+    mobile_cookie,
 )
 from .config import Config
 from .fetcher import SteamFeed, SteamFeedError
-from .notifier import NotificationError, notify
+from .notifier import NotificationError, notify, send_message
 from .parser import parse_events
 from .state import SeenState
 
@@ -53,6 +54,7 @@ def _parser() -> argparse.ArgumentParser:
     login = sub.add_parser("login")
     login.add_argument("--device-name", default="steam-feed-notifier")
     login.add_argument("--timeout", type=int, default=600)
+    login.add_argument("--platform", choices=("mobile", "web"), default="mobile")
     sub.add_parser("auth-status")
     return p
 
@@ -103,6 +105,42 @@ def reload_config(path: str, previous: Config | None = None) -> Config:
             raise
         print(f"config reload failed: {exc}; using last good config", flush=True)
         return previous
+
+
+def _send_watch_message(config: Config, title: str, body: str) -> None:
+    if config.dry_run:
+        print(f"{title} | {body}", flush=True)
+        return
+    try:
+        send_message(title, body, config.apprise_urls)
+    except Exception as exc:  # noqa: BLE001 - notification failures must not stop polling
+        print(f"error notification failed: {type(exc).__name__}", flush=True)
+
+
+def _handle_poll_error(
+    config: Config,
+    error: Exception,
+    last_error: str | None,
+) -> str:
+    message = str(error)
+    if config.notify_errors and message != last_error:
+        body = message
+        if isinstance(error, SteamAuthExpiredError):
+            body += (
+                "\nRe-run: docker compose run --rm steam-feed-notifier "
+                "--config /config/config.yaml login"
+            )
+        _send_watch_message(config, "[Error] Steam feed notifier", body)
+    return message
+
+
+def _handle_poll_recovery(config: Config, last_error: str | None) -> None:
+    if last_error is not None and config.notify_errors:
+        _send_watch_message(
+            config,
+            "[Recovered] Steam feed notifier",
+            "Polling works again.",
+        )
 
 
 def run_once(config: Config, first_run_notify: bool = False, fixture_dir: str | None = None) -> None:
@@ -189,19 +227,32 @@ def main() -> None:
                 print("QR rendering is unavailable; use the URL above.", flush=True)
 
         session = requests.Session()
-        steamid, refresh_token = login_via_qr(
+        steamid, refresh_token, access_token = login_via_qr(
             session,
             args.device_name,
             show_challenge,
             timeout=args.timeout,
+            platform=args.platform,
         )
         store = TokenStore(config.auth_file)
-        store.save({"steamid": steamid, "refresh_token": refresh_token})
-        cookie, rotated_refresh = mint_web_cookie(session, refresh_token, steamid)
-        if rotated_refresh:
-            refresh_token = rotated_refresh
+        if args.platform == "mobile":
+            if not access_token:
+                raise SteamAuthError("Steam did not return an access token")
+            cookie = mobile_cookie(steamid, access_token)
+        else:
+            store.save(
+                {
+                    "platform": "web",
+                    "steamid": steamid,
+                    "refresh_token": refresh_token,
+                }
+            )
+            cookie, rotated_refresh = mint_web_cookie(session, refresh_token, steamid)
+            if rotated_refresh:
+                refresh_token = rotated_refresh
         store.save(
             {
+                "platform": args.platform,
                 "steamid": steamid,
                 "refresh_token": refresh_token,
                 "cookie": cookie,
@@ -210,6 +261,7 @@ def main() -> None:
         )
         refresh_expiry = jwt_claims(refresh_token).get("exp")
         print(f"Logged in SteamID: {steamid}")
+        print(f"Platform: {args.platform}")
         print(
             "Login verified: fetched a steamLoginSecure cookie "
             f"(expires {_format_expiry(cookie_expiry(cookie))})"
@@ -220,6 +272,7 @@ def main() -> None:
         manager = AuthManager(TokenStore(config.auth_file), requests.Session())
         status = manager.status()
         print(f"SteamID: {status['steamid']}")
+        print(f"Platform: {status['platform']}")
         print(f"Cookie expiry: {_format_expiry(status['cookie_expiry'])}")
         print(f"Refresh-token expiry: {_format_expiry(status['refresh_expiry'])}")
         return
@@ -240,6 +293,7 @@ def main() -> None:
     delay = config.poll_interval
     first_run_notify = args.notify_first_run
     loaded = config
+    last_error: str | None = None
     while True:
         previous, loaded = loaded, reload_config(args.config, loaded)
         if loaded != previous:
@@ -250,13 +304,17 @@ def main() -> None:
         config = replace(loaded, dry_run=loaded.dry_run or args.dry_run)
         try:
             run_once(config, first_run_notify=first_run_notify)
+            _handle_poll_recovery(config, last_error)
+            last_error = None
             delay = config.poll_interval
             first_run_notify = False
         except SteamAuthExpiredError as exc:
             print(f"poll failed: authentication expired; {exc}; run login again", flush=True)
+            last_error = _handle_poll_error(config, exc, last_error)
             delay = min(delay * 2, 3600)
         except (SteamFeedError, OSError, RuntimeError) as exc:
             print(f"poll failed: {exc}", flush=True)
+            last_error = _handle_poll_error(config, exc, last_error)
             delay = min(delay * 2, 3600)
         time.sleep(delay + random.uniform(0, min(30, delay * 0.1)))
 
