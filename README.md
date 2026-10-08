@@ -17,6 +17,10 @@ cp config.example.yaml config.yaml
 steam-feed-notifier --config config.yaml once
 ```
 
+Without `--config`, the CLI reads `config.yaml` from the current directory.
+`STEAM_FEED_CONFIG` overrides that default, while an explicit `--config` takes
+precedence over the environment variable.
+
 Authenticate with Steam's QR flow. The default WebBrowser platform:
 
 ```sh
@@ -126,10 +130,20 @@ inside the container. The service runs `watch` and persists the seen-event
 state in the host `./state` directory (mounted at `/state` in the container).
 The compose environment override makes the state path `/state/seen.json`, so
 the auth file defaults to `/state/auth.json`; container restarts do not re-seed
-or re-notify old activity. Run the one-time login in the container with:
+or re-notify old activity. The Docker image and Compose service set
+`STEAM_FEED_CONFIG=/config/config.yaml`, so Docker commands can omit
+`--config`. An explicit `--config` in an existing Compose command still
+overrides the environment setting. Run the one-time login in the container
+with:
 
 ```sh
-docker compose run --rm steam-feed-notifier --config /config/config.yaml login
+docker compose run --rm steam-feed-notifier login
+```
+
+Check authentication status with:
+
+```sh
+docker compose run --rm steam-feed-notifier auth-status
 ```
 
 Approve the printed QR code in the Steam mobile app. Compose runs as UID/GID
