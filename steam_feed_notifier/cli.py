@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -54,7 +55,7 @@ def _parser() -> argparse.ArgumentParser:
     login = sub.add_parser("login")
     login.add_argument("--device-name", default="steam-feed-notifier")
     login.add_argument("--timeout", type=int, default=600)
-    login.add_argument("--platform", choices=("mobile", "web"), default="mobile")
+    login.add_argument("--platform", choices=("mobile", "web"), default="web")
     sub.add_parser("auth-status")
     return p
 
@@ -213,6 +214,15 @@ def main() -> None:
     args = _parser().parse_args()
     config = reload_config(args.config)
     if args.command == "login":
+        if args.platform == "mobile":
+            print(
+                "Warning: MobileApp login makes this server look like a new Android Steam device; "
+                "Steam may flag it as account theft and restrict your account. Prefer the default "
+                "web login.",
+                file=sys.stderr,
+                flush=True,
+            )
+
         def show_challenge(url: str) -> None:
             print(f"Scan this QR code in the Steam mobile app:\n{url}", flush=True)
             try:

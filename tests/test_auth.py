@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from steam_feed_notifier import cli
 from steam_feed_notifier.auth import (
     AUTH_HEADERS,
     MOBILE_API_HEADERS,
@@ -17,8 +18,10 @@ from steam_feed_notifier.auth import (
     login_via_qr,
     mint_web_cookie,
     mobile_cookie,
+    poll_auth_session,
 )
 from steam_feed_notifier.cli import _format_expiry, _parser
+from steam_feed_notifier.config import Config
 from steam_feed_notifier.fetcher import SteamFeed, SteamFeedError
 
 
@@ -92,7 +95,7 @@ def test_token_store_missing_and_atomic_private_save(tmp_path):
 def test_auth_api_rejected_refresh_token_is_expired(eresult):
     session = FakeSession([FakeResponse({"response": {}}, {"x-eresult": eresult})])
     with pytest.raises(SteamAuthExpiredError, match="re-run login"):
-        begin_qr_session(session, "device")
+        begin_qr_session(session, "device", platform="mobile")
 
 
 def test_begin_qr_session_encodes_mobile_device_details_and_headers():
@@ -110,7 +113,7 @@ def test_begin_qr_session_encodes_mobile_device_details_and_headers():
         ]
     )
 
-    begin_qr_session(session, "test-device")
+    begin_qr_session(session, "test-device", platform="mobile")
 
     call = session.post_calls[0]
     assert call["data"] is None
@@ -124,7 +127,7 @@ def test_begin_qr_session_encodes_mobile_device_details_and_headers():
     assert call["headers"] == MOBILE_API_HEADERS
 
 
-def test_begin_qr_session_web_fallback_keeps_browser_request():
+def test_begin_qr_session_defaults_to_web_browser():
     session = FakeSession(
         [
             FakeResponse(
@@ -139,7 +142,7 @@ def test_begin_qr_session_web_fallback_keeps_browser_request():
         ]
     )
 
-    begin_qr_session(session, "device", platform="web")
+    begin_qr_session(session, "device")
 
     call = session.post_calls[0]
     assert call["data"] == {
@@ -148,6 +151,18 @@ def test_begin_qr_session_web_fallback_keeps_browser_request():
         "website_id": "Community",
     }
     assert call["headers"] == AUTH_HEADERS
+
+
+def test_poll_auth_session_defaults_to_web_browser():
+    session = FakeSession([FakeResponse({"response": {}})])
+
+    poll_auth_session(session, "client", "request")
+
+    assert session.post_calls[0]["headers"] == AUTH_HEADERS
+    assert session.post_calls[0]["data"] == {
+        "client_id": "client",
+        "request_id": "request",
+    }
 
 
 def test_qr_login_polls_and_handles_rotated_challenge(monkeypatch):
@@ -181,7 +196,13 @@ def test_qr_login_polls_and_handles_rotated_challenge(monkeypatch):
     challenges = []
     monkeypatch.setattr("steam_feed_notifier.auth.time.sleep", lambda _: None)
 
-    result = login_via_qr(session, "test-device", challenges.append, timeout=10)
+    result = login_via_qr(
+        session,
+        "test-device",
+        challenges.append,
+        timeout=10,
+        platform="mobile",
+    )
 
     assert result == ("76561198000000001", refresh, access)
     assert challenges == ["https://qr/one", "https://qr/two"]
@@ -189,6 +210,35 @@ def test_qr_login_polls_and_handles_rotated_challenge(monkeypatch):
     assert session.post_calls[1]["headers"] == MOBILE_API_HEADERS
     assert session.post_calls[1]["data"]["client_id"] == "client"
     assert session.post_calls[2]["data"]["client_id"] == "rotated-client"
+
+
+def test_qr_login_defaults_to_web_browser(monkeypatch):
+    refresh = token(sub="76561198000000001", exp=int(time.time()) + 100000)
+    session = FakeSession(
+        [
+            FakeResponse(
+                {
+                    "response": {
+                        "client_id": "client",
+                        "challenge_url": "https://qr",
+                        "request_id": "request",
+                    }
+                }
+            ),
+            FakeResponse({"response": {"refresh_token": refresh}}),
+        ]
+    )
+    monkeypatch.setattr("steam_feed_notifier.auth.time.sleep", lambda _: None)
+
+    result = login_via_qr(session, "test-device", lambda _: None, timeout=10)
+
+    assert result == ("76561198000000001", refresh, None)
+    assert session.post_calls[0]["data"] == {
+        "device_friendly_name": AUTH_HEADERS["User-Agent"],
+        "platform_type": "2",
+        "website_id": "Community",
+    }
+    assert session.post_calls[1]["headers"] == AUTH_HEADERS
 
 
 def test_mint_web_cookie_uses_multipart_and_extracts_rotation(monkeypatch):
@@ -365,11 +415,46 @@ def test_mobile_auth_manager_persists_rotated_refresh_before_new_cookie(tmp_path
 def test_login_parser_defaults_to_ten_minute_timeout():
     args = _parser().parse_args(["login"])
     assert args.timeout == 600
-    assert args.platform == "mobile"
+    assert args.platform == "web"
     assert _parser().parse_args(["login", "--timeout", "42"]).timeout == 42
-    assert _parser().parse_args(["login", "--platform", "web"]).platform == "web"
+    assert _parser().parse_args(["login", "--platform", "mobile"]).platform == "mobile"
     assert _format_expiry(0) == "unknown"
     assert _format_expiry(None) == "unknown"
+
+
+def test_mobile_login_prints_account_risk_warning_before_qr(
+    monkeypatch, capsys, tmp_path
+):
+    warning = (
+        "Warning: MobileApp login makes this server look like a new Android Steam device; "
+        "Steam may flag it as account theft and restrict your account. Prefer the default "
+        "web login."
+    )
+    refresh = token(sub="76561198000000001", exp=int(time.time()) + 100000)
+    access = token(sub="76561198000000001", exp=int(time.time()) + 3600)
+    stderr_before_qr = []
+
+    def fake_login_via_qr(session, device_name, on_challenge, **kwargs):
+        stderr_before_qr.append(capsys.readouterr().err)
+        assert kwargs["platform"] == "mobile"
+        on_challenge("https://qr")
+        return "76561198000000001", refresh, access
+
+    monkeypatch.setattr(
+        cli,
+        "reload_config",
+        lambda _: Config(profile="example", auth_file=str(tmp_path / "auth.json")),
+    )
+    monkeypatch.setattr(cli, "login_via_qr", fake_login_via_qr)
+    monkeypatch.setattr(
+        cli.sys,
+        "argv",
+        ["steam-feed-notifier", "--config", "unused.yaml", "login", "--platform", "mobile"],
+    )
+
+    cli.main()
+
+    assert stderr_before_qr == [warning + "\n"]
 
 
 def test_fetcher_refreshes_once_after_logged_out_response():

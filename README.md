@@ -17,23 +17,30 @@ cp config.example.yaml config.yaml
 steam-feed-notifier --config config.yaml once
 ```
 
-Authenticate once with Steam's QR flow. The default MobileApp platform uses
-renewable refresh tokens:
+Authenticate with Steam's QR flow. The default WebBrowser platform:
 
 ```sh
 steam-feed-notifier --config config.yaml login
 ```
 
-Scan and approve the printed QR code in the Steam mobile app. If the app
-refuses to load the QR, use the WebBrowser fallback:
+Scan and approve the printed QR code in the Steam mobile app. WebBrowser
+refresh tokens cannot be renewed, so scan again when the refresh token expires
+(see `auth-status`). The ntfy error alert reports when Steam rejects an expired
+refresh token and tells you to run `login` again.
+
+MobileApp login is an opt-in renewable alternative:
 
 ```sh
-steam-feed-notifier --config config.yaml login --platform web
+steam-feed-notifier --config config.yaml login --platform mobile
 ```
 
-WebBrowser refresh tokens cannot be renewed, so that login must be repeated
-when the refresh token expires (around the expiry shown by `auth-status`). The
-resulting `auth.json` is stored beside `state_file` (the default is
+Warning: MobileApp login makes this server look like a new Android Steam
+device; Steam may flag it as account theft and restrict your account. Prefer
+the default web login. This has happened in practice: after an approved
+MobileApp QR login, Steam flagged the account as possibly accessed by someone
+else and disabled Community access.
+
+The resulting `auth.json` is stored beside `state_file` (the default is
 `~/.local/state/steam-feed-notifier/auth.json`). The `steamLoginSecure` cookie
 is renewed automatically; MobileApp refresh tokens are rotated and persisted.
 Check the platform and authentication expiries with:
