@@ -1,10 +1,11 @@
 services:
   steam-feed-notifier:
     build: .
-    command: ["--config", "/config/config.yaml", "watch"]
+    command: ["watch"]
     restart: unless-stopped
     user: "${UID:-1000}:${GID:-1000}"
     environment:
+      STEAM_FEED_CONFIG: /config/config.yaml
       STEAM_LOGIN_SECURE: "${STEAM_LOGIN_SECURE:-}"
       STEAM_FEED_STATE_FILE: /state/seen.json
     volumes:

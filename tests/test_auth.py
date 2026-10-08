@@ -422,6 +422,17 @@ def test_login_parser_defaults_to_ten_minute_timeout():
     assert _format_expiry(None) == "unknown"
 
 
+def test_parser_config_default_reads_environment_when_built(monkeypatch):
+    monkeypatch.delenv("STEAM_FEED_CONFIG", raising=False)
+    assert _parser().parse_args(["once"]).config == "config.yaml"
+
+    monkeypatch.setenv("STEAM_FEED_CONFIG", "/config/config.yaml")
+    assert _parser().parse_args(["once"]).config == "/config/config.yaml"
+    assert _parser().parse_args(["--config", "explicit.yaml", "once"]).config == (
+        "explicit.yaml"
+    )
+
+
 def test_mobile_login_prints_account_risk_warning_before_qr(
     monkeypatch, capsys, tmp_path
 ):

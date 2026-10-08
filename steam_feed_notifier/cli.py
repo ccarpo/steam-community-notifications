@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -42,7 +43,10 @@ def _format_expiry(value: int | str | None) -> str:
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="steam-feed-notifier")
-    p.add_argument("--config", default="config.yaml")
+    p.add_argument(
+        "--config",
+        default=os.environ.get("STEAM_FEED_CONFIG", "config.yaml"),
+    )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--notify-first-run", action="store_true")
     p.add_argument("--fixture-dir", help="read day*.html fixtures instead of the live feed")
@@ -128,8 +132,7 @@ def _handle_poll_error(
         body = message
         if isinstance(error, SteamAuthExpiredError):
             body += (
-                "\nRe-run: docker compose run --rm steam-feed-notifier "
-                "--config /config/config.yaml login"
+                "\nRe-run: docker compose run --rm steam-feed-notifier login"
             )
         _send_watch_message(config, "[Error] Steam feed notifier", body)
     return message

@@ -53,8 +53,7 @@ def test_auth_expiry_notification_includes_compose_login_command(monkeypatch):
     assert calls[0][0] == "[Error] Steam feed notifier"
     assert calls[0][1] == (
         "Steam authentication failed (eresult 15)\n"
-        "Re-run: docker compose run --rm steam-feed-notifier "
-        "--config /config/config.yaml login"
+        "Re-run: docker compose run --rm steam-feed-notifier login"
     )
 
 

@@ -1,7 +1,8 @@
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    STEAM_FEED_CONFIG=/config/config.yaml
 
 WORKDIR /app
 
@@ -17,4 +18,4 @@ VOLUME ["/config", "/state"]
 USER app
 
 ENTRYPOINT ["steam-feed-notifier"]
-CMD ["--config", "/config/config.yaml", "watch"]
+CMD ["watch"]
