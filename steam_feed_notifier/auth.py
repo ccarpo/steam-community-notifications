@@ -155,7 +155,7 @@ def _mobile_qr_request(device_name: str) -> str:
 def begin_qr_session(
     session: requests.Session,
     device_name: str,
-    platform: str = "mobile",
+    platform: str = "web",
 ) -> dict[str, Any]:
     if platform == "mobile":
         result, _ = _post(
@@ -188,7 +188,7 @@ def poll_auth_session(
     session: requests.Session,
     client_id: str,
     request_id: str,
-    platform: str = "mobile",
+    platform: str = "web",
 ) -> dict[str, Any]:
     if platform not in {"mobile", "web"}:
         raise ValueError("platform must be 'mobile' or 'web'")
@@ -354,7 +354,7 @@ def login_via_qr(
     device_name: str,
     on_challenge: Callable[[str], None],
     timeout: int = 180,
-    platform: str = "mobile",
+    platform: str = "web",
 ) -> tuple[str, str, str | None]:
     if platform not in {"mobile", "web"}:
         raise ValueError("platform must be 'mobile' or 'web'")
